@@ -88,7 +88,7 @@ lazy val publishSettings : Seq[Setting[_]] = Seq(
 // should not be set directly. It is the same as the Maven version and derived automatically from `baseVersion` and
 // `baseVersionSuffix`.
 globalVersionSettings
-baseVersion in Global := "2.12.2"
+baseVersion in Global := "2.12.4"
 baseVersionSuffix in Global := "SNAPSHOT"
 mimaReferenceVersion in Global := Some("2.12.0")
 
@@ -166,8 +166,8 @@ lazy val commonSettings = clearSourceAndResourceDirectories ++ publishSettings +
         <url>https://github.com/scala/scala.git</url>
       </scm>
         <issueManagement>
-          <system>JIRA</system>
-          <url>https://issues.scala-lang.org/</url>
+          <system>GitHub</system>
+          <url>https://github.com/scala/bug/issues</url>
         </issueManagement>
         <developers>
           <developer>
@@ -337,8 +337,6 @@ lazy val library = configureAsSubproject(project)
         "-doc-root-content", (sourceDirectory in Compile).value + "/rootdoc.txt"
       )
     },
-    // macros in library+reflect are hard-wired to implementations with `FastTrack`.
-    incOptions := incOptions.value.withRecompileOnMacroDef(false),
     includeFilter in unmanagedResources in Compile := "*.tmpl" | "*.xml" | "*.js" | "*.css" | "rootdoc.txt",
     // Include *.txt files in source JAR:
     mappings in Compile in packageSrc ++= {
@@ -353,12 +351,13 @@ lazy val library = configureAsSubproject(project)
       "/project/packaging" -> <packaging>jar</packaging>
     ),
     // Remove the dependency on "forkjoin" from the POM because it is included in the JAR:
-    pomDependencyExclusions += ((organization.value, "forkjoin"))
+    pomDependencyExclusions += ((organization.value, "forkjoin")),
+    mimaPreviousArtifacts := mimaReferenceVersion.value.map(organization.value % name.value % _).toSet,
+    mimaCheckDirection := "both"
   )
   .settings(filterDocSources("*.scala" -- (regexFileFilter(".*/runtime/.*\\$\\.scala") ||
                                            regexFileFilter(".*/runtime/ScalaRunTime\\.scala") ||
                                            regexFileFilter(".*/runtime/StringAdd\\.scala"))))
-  .settings(MiMa.settings)
 
 lazy val reflect = configureAsSubproject(project)
   .settings(generatePropertiesFileSettings)
@@ -366,8 +365,6 @@ lazy val reflect = configureAsSubproject(project)
   .settings(
     name := "scala-reflect",
     description := "Scala Reflection Library",
-    // macros in library+reflect are hard-wired to implementations with `FastTrack`.
-    incOptions := incOptions.value.withRecompileOnMacroDef(false),
     Osgi.bundleName := "Scala Reflect",
     scalacOptions in Compile in doc ++= Seq(
       "-skip-packages", "scala.reflect.macros.internal:scala.reflect.internal:scala.reflect.io"
@@ -380,9 +377,10 @@ lazy val reflect = configureAsSubproject(project)
       "/project/name" -> <name>Scala Compiler</name>,
       "/project/description" -> <description>Compiler for the Scala Programming Language</description>,
       "/project/packaging" -> <packaging>jar</packaging>
-    )
+    ),
+    mimaPreviousArtifacts := mimaReferenceVersion.value.map(organization.value % name.value % _).toSet,
+    mimaCheckDirection := "both"
   )
-  .settings(MiMa.settings)
   .dependsOn(library)
 
 lazy val compiler = configureAsSubproject(project)
@@ -579,8 +577,11 @@ lazy val scalacheck = project.in(file("test") / "scalacheck")
   .settings(disableDocs)
   .settings(disablePublishing)
   .settings(
-    fork in Test := true,
+    fork in Test := false,
     javaOptions in Test += "-Xss1M",
+    testOptions += Tests.Cleanup { loader =>
+      ModuleUtilities.getObject("scala.TestCleanup", loader).asInstanceOf[Runnable].run()
+    },
     libraryDependencies ++= Seq(scalacheckDep),
     unmanagedSourceDirectories in Compile := Nil,
     unmanagedSourceDirectories in Test := List(baseDirectory.value)
@@ -676,7 +677,8 @@ lazy val test = project
     // test sources are compiled in partest run, not here
     sources in IntegrationTest := Seq.empty,
     fork in IntegrationTest := true,
-    javaOptions in IntegrationTest += "-Xmx2G",
+    javaOptions in IntegrationTest ++= "-Xmx2G" :: "-Dfile.encoding=UTF-8" :: Nil,
+    testOptions in IntegrationTest += Tests.Argument("-Dfile.encoding=UTF-8"),
     testFrameworks += new TestFramework("scala.tools.partest.sbt.Framework"),
     testOptions in IntegrationTest += Tests.Argument("-Dpartest.java_opts=-Xmx1024M -Xms64M"),
     testOptions in IntegrationTest += Tests.Argument("-Dpartest.scalac_opts=" + (scalacOptions in Compile).value.mkString(" ")),
@@ -754,10 +756,10 @@ lazy val scalaDist = Project("scala-dist", file(".") / "target" / "scala-dist-di
       val fixedManOut = (resourceManaged in Compile).value / "man"
       IO.createDirectory(htmlOut)
       IO.createDirectory(manOut / "man1")
-      toError(runner.value.run("scala.tools.docutil.ManMaker",
+      runner.value.run("scala.tools.docutil.ManMaker",
         (fullClasspath in Compile in manual).value.files,
         Seq(command, htmlOut.getAbsolutePath, manOut.getAbsolutePath),
-        streams.value.log))
+        streams.value.log).foreach(sys.error)
       (manOut ** "*.1" pair rebase(manOut, fixedManOut)).foreach { case (in, out) =>
         // Generated manpages should always use LF only. There doesn't seem to be a good reason
         // for generating them with the platform EOL first and then converting them but that's
@@ -817,8 +819,8 @@ lazy val root: Project = (project in file("."))
         (testOnly in IntegrationTest in testP).toTask(" -- --srcpath scaladoc").result,
         (Keys.test in Test in osgiTestFelix).result,
         (Keys.test in Test in osgiTestEclipse).result,
-        (MiMa.mima in library).result,
-        (MiMa.mima in reflect).result,
+        (mimaReportBinaryIssues in library).result,
+        (mimaReportBinaryIssues in reflect).result,
         Def.task(()).dependsOn( // Run these in parallel:
           doc in Compile in library,
           doc in Compile in reflect,
@@ -836,8 +838,8 @@ lazy val root: Project = (project in file("."))
         "partest --srcpath scaladoc",
         "osgiTestFelix/test",
         "osgiTestEclipse/test",
-        "library/mima",
-        "reflect/mima",
+        "library/mimaReportBinaryIssues",
+        "reflect/mimaReportBinaryIssues",
         "doc"
       )
       val failed = results.map(_.toEither).zip(descriptions).collect { case (Left(i: Incomplete), d) => (i, d) }
@@ -881,7 +883,11 @@ lazy val root: Project = (project in file("."))
       }
     },
     antStyle := false,
-    incOptions := incOptions.value.withNameHashing(!antStyle.value).withAntStyle(antStyle.value)
+    incOptions := {
+      incOptions.value
+        .withNameHashing(!antStyle.value).withAntStyle(antStyle.value)
+        .withRecompileOnMacroDef(false) //     // macros in library+reflect are hard-wired to implementations with `FastTrack`.
+    }
   )
   .aggregate(library, reflect, compiler, interactive, repl, replJline, replJlineEmbedded,
     scaladoc, scalap, partestExtras, junit, libraryAll, scalaDist).settings(

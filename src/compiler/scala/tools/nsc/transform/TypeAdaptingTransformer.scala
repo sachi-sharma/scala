@@ -15,7 +15,7 @@ trait TypeAdaptingTransformer { self: TreeDSL =>
     def typedPos(pos: Position)(tree: Tree): Tree
 
     /**
-     * SI-4148: can't always replace box(unbox(x)) by x because
+     * scala/bug#4148: can't always replace box(unbox(x)) by x because
      *   - unboxing x may lead to throwing an exception, e.g. in "aah".asInstanceOf[Int]
      *   - box(unbox(null)) is not `null` but the box of zero
      */
@@ -72,13 +72,17 @@ trait TypeAdaptingTransformer { self: TreeDSL =>
         val ldef = deriveLabelDef(tree)(unbox(_, pt))
         ldef setType ldef.rhs.tpe
       case _ =>
+        def preservingSideEffects(side: Tree, value: Tree): Tree =
+          if (treeInfo isExprSafeToInline side) value
+          else BLOCK(side, value)
         val tree1 = pt match {
+          case ErasedValueType(clazz, BoxedUnitTpe) =>
+            cast(preservingSideEffects(tree, REF(BoxedUnit_UNIT)), pt)
           case ErasedValueType(clazz, underlying) => cast(unboxValueClass(tree, clazz, underlying), pt)
           case _ =>
             pt.typeSymbol match {
               case UnitClass  =>
-                if (treeInfo isExprSafeToInline tree) UNIT
-                else BLOCK(tree, UNIT)
+                preservingSideEffects(tree, UNIT)
               case x          =>
                 assert(x != ArrayClass)
                 // don't `setType pt` the Apply tree, as the Apply's fun won't be typechecked if the Apply tree already has a type
@@ -90,7 +94,7 @@ trait TypeAdaptingTransformer { self: TreeDSL =>
 
     final def unboxValueClass(tree: Tree, clazz: Symbol, underlying: Type): Tree =
       if (tree.tpe.typeSymbol == NullClass && isPrimitiveValueClass(underlying.typeSymbol)) {
-        // convert `null` directly to underlying type, as going via the unboxed type would yield a NPE (see SI-5866)
+        // convert `null` directly to underlying type, as going via the unboxed type would yield a NPE (see scala/bug#5866)
         unbox(tree, underlying)
       } else
         Apply(Select(adaptToType(tree, clazz.tpe), clazz.derivedValueClassUnbox), List())
@@ -110,11 +114,11 @@ trait TypeAdaptingTransformer { self: TreeDSL =>
         log(s"erasure ${word}s from ${tree.tpe} to $pt")
       }
       if (pt =:= UnitTpe) {
-        // See SI-4731 for one example of how this occurs.
+        // See scala/bug#4731 for one example of how this occurs.
         log("Attempted to cast to Unit: " + tree)
         tree.duplicate setType pt
       } else if (tree.tpe != null && tree.tpe.typeSymbol == ArrayClass && pt.typeSymbol == ArrayClass) {
-        // See SI-2386 for one example of when this might be necessary.
+        // See scala/bug#2386 for one example of when this might be necessary.
         val needsExtraCast = isPrimitiveValueType(tree.tpe.typeArgs.head) && !isPrimitiveValueType(pt.typeArgs.head)
         val tree1 = if (needsExtraCast) gen.mkRuntimeCall(nme.toObjectArray, List(tree)) else tree
         gen.mkAttributedCast(tree1, pt)

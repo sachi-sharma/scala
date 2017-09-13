@@ -807,10 +807,11 @@ self =>
     }
 
     private[this] def checkTupleSize(elems: List[Tree], offset: Offset): Boolean =
-      if (elems.lengthCompare(definitions.MaxTupleArity) > 0) {
-        syntaxError(offset, "too many elements for tuple: "+elems.length+", allowed: "+definitions.MaxTupleArity, skipIt = false)
+      elems.lengthCompare(definitions.MaxTupleArity) <= 0 || {
+        val msg = s"too many elements for tuple: ${elems.length}, allowed: ${definitions.MaxTupleArity}"
+        syntaxError(offset, msg, skipIt = false)
         false
-      } else true
+      }
 
     /** Strip the artificial `Parens` node to create a tuple term Tree. */
     def stripParens(t: Tree) = t match {
@@ -820,16 +821,21 @@ self =>
 
     /** Create tree representing (unencoded) binary operation expression or pattern. */
     def makeBinop(isExpr: Boolean, left: Tree, op: TermName, right: Tree, opPos: Position, targs: List[Tree] = Nil): Tree = {
-      require(isExpr || targs.isEmpty || targs.exists(_.isErroneous), s"Incompatible args to makeBinop: !isExpr but targs=$targs")
+      require(isExpr || targs.isEmpty || targs.exists(_.isErroneous),
+        s"Incompatible args to makeBinop: !isExpr but targs=$targs")
 
       def mkSelection(t: Tree) = {
-        def sel = atPos(opPos union t.pos)(Select(stripParens(t), op.encode))
-        if (targs.isEmpty) sel else atPos(left.pos)(TypeApply(sel, targs))
+        val pos = opPos union t.pos
+        val sel = atPos(pos)(Select(stripParens(t), op.encode))
+        if (targs.isEmpty) sel
+        else atPos(pos union targs.last.pos withPoint pos.point) {
+          TypeApply(sel, targs)
+        }
       }
       def mkNamed(args: List[Tree]) = if (isExpr) args map treeInfo.assignmentToMaybeNamedArg else args
       val arguments = right match {
         case Parens(args) => mkNamed(args)
-        case _            => List(right)
+        case _            => right :: Nil
       }
       if (isExpr) {
         if (treeInfo.isLeftAssoc(op)) {
@@ -1138,7 +1144,7 @@ self =>
     def identOrMacro(): Name = if (isMacro) rawIdent() else ident()
 
     def selector(t: Tree): Tree = {
-      val point = if(isIdent) in.offset else in.lastOffset //SI-8459
+      val point = if(isIdent) in.offset else in.lastOffset //scala/bug#8459
       //assert(t.pos.isDefined, t)
       if (t != EmptyTree)
         Select(t, ident(skipIt = false)) setPos r2p(t.pos.start, point, in.lastOffset)
@@ -1645,9 +1651,11 @@ self =>
       if (isUnaryOp) {
         atPos(in.offset) {
           if (lookingAhead(isSimpleExprIntro)) {
+            val namePos = in.offset
             val uname = nme.toUnaryName(rawIdent().toTermName)
             if (uname == nme.UNARY_- && isNumericLit)
-              simpleExprRest(literal(isNegated = true), canApply = true)
+              /* start at the -, not the number */
+              simpleExprRest(literal(isNegated = true, start = namePos), canApply = true)
             else
               Select(stripParens(simpleExpr()), uname)
           }
@@ -1973,7 +1981,7 @@ self =>
       def pattern3(): Tree = {
         val top = simplePattern(badPattern3)
         val base = opstack
-        // See SI-3189, SI-4832 for motivation. Cf SI-3480 for counter-motivation.
+        // See scala/bug#3189, scala/bug#4832 for motivation. Cf scala/bug#3480 for counter-motivation.
         def isCloseDelim = in.token match {
           case RBRACE => isXML
           case RPAREN => !isXML

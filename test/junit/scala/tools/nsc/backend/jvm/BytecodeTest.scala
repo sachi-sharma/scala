@@ -9,6 +9,7 @@ import scala.tools.asm.Opcodes._
 import scala.tools.partest.ASMConverters._
 import scala.tools.testing.BytecodeTesting
 import scala.tools.testing.BytecodeTesting._
+import scala.collection.JavaConverters._
 
 @RunWith(classOf[JUnit4])
 class BytecodeTest extends BytecodeTesting {
@@ -194,5 +195,30 @@ class BytecodeTest extends BytecodeTesting {
     val m = compileMethod(code)
     val List(ExceptionHandler(_, _, _, desc)) = m.handlers
     assert(desc == None, desc)
+  }
+
+  @Test
+  def classesEndingInDollarHaveSignature(): Unit = {
+    // A name-based test in the backend prevented classes ending in $ from getting a Scala signature
+    val code = "class C$"
+    val c = compileClass(code)
+    assertEquals(c.attrs.asScala.toList.map(_.`type`).sorted, List("ScalaInlineInfo", "ScalaSig"))
+  }
+
+  @Test
+  def t10343(): Unit = {
+    val main = "class Main { Person() }"
+    val person = "case class Person(age: Int = 1)"
+
+    def check(code: String) = {
+      val List(_, _, pm) = compileClasses(code)
+      assertEquals(pm.name, "Person$")
+      assertEquals(pm.methods.asScala.map(_.name).toList,
+        // after typer, `"$lessinit$greater$default$1"` is next to `<init>`, but the constructor phase
+        // and code gen change module constructors around. the second `apply` is a bridge, created in erasure.
+        List("<clinit>", "$lessinit$greater$default$1", "toString", "apply", "apply$default$1", "unapply", "readResolve", "apply", "<init>"))
+    }
+    check(s"$main\n$person")
+    check(s"$person\n$main")
   }
 }

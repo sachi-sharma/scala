@@ -7,23 +7,37 @@ package scala.tools.nsc
 package backend.jvm
 package opt
 
+import java.util.regex.Pattern
+
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.tools.asm.Opcodes
 import scala.tools.asm.tree.{AbstractInsnNode, MethodInsnNode, MethodNode}
 import scala.tools.nsc.backend.jvm.BTypes.InternalName
 import scala.tools.nsc.backend.jvm.BackendReporting.{CalleeNotFinal, OptimizerWarning}
+import scala.tools.nsc.backend.jvm.opt.InlinerHeuristics.InlineSourceMatcher
 
-class InlinerHeuristics[BT <: BTypes](val bTypes: BT) {
+abstract class InlinerHeuristics extends PerRunInit {
+  val postProcessor: PostProcessor
+
+  import postProcessor._
   import bTypes._
   import callGraph._
+  import frontendAccess.{backendReporting, compilerSettings}
+
+  lazy val inlineSourceMatcher: LazyVar[InlineSourceMatcher] = perRunLazy(this)(new InlineSourceMatcher(compilerSettings.optInlineFrom))
 
   final case class InlineRequest(callsite: Callsite, post: List[InlineRequest], reason: String) {
     // invariant: all post inline requests denote callsites in the callee of the main callsite
     for (pr <- post) assert(pr.callsite.callsiteMethod == callsite.callee.get.callee, s"Callsite method mismatch: main $callsite - post ${pr.callsite}")
   }
 
-  def canInlineFromSource(sourceFilePath: Option[String]) = compilerSettings.optInlineGlobal || sourceFilePath.isDefined
+  def canInlineFromSource(sourceFilePath: Option[String], calleeDeclarationClass: InternalName) = {
+    compilerSettings.optLClasspath ||
+      compilerSettings.optLProject && sourceFilePath.isDefined ||
+      inlineSourceMatcher.get.allowFromSources && sourceFilePath.isDefined ||
+      inlineSourceMatcher.get.allow(calleeDeclarationClass)
+  }
 
   /**
    * Select callsites from the call graph that should be inlined, grouped by the containing method.
@@ -64,13 +78,6 @@ class InlinerHeuristics[BT <: BTypes](val bTypes: BT) {
     }).filterNot(_._2.isEmpty).toMap
   }
 
-  private def isTraitStaticSuperAccessorName(s: String) = s.endsWith("$")
-  private def traitStaticSuperAccessorName(s: String) = s + "$"
-
-  private def isTraitSuperAccessor(method: MethodNode, owner: ClassBType): Boolean = {
-    owner.isInterface == Right(true) && BytecodeUtils.isStaticMethod(method) && isTraitStaticSuperAccessorName(method.name)
-  }
-
   private def findSingleCall(method: MethodNode, such: MethodInsnNode => Boolean): Option[MethodInsnNode] = {
     @tailrec def noMoreInvoke(insn: AbstractInsnNode): Boolean = {
       insn == null || (!insn.isInstanceOf[MethodInsnNode] && noMoreInvoke(insn.getNext))
@@ -87,16 +94,25 @@ class InlinerHeuristics[BT <: BTypes](val bTypes: BT) {
     }
     find(method.instructions.getFirst)
   }
+
+  private def traitStaticSuperAccessorName(s: String) = s + "$"
+
+  private def traitMethodInvocation(method: MethodNode): Option[MethodInsnNode] =
+    findSingleCall(method, mi => mi.itf && mi.getOpcode == Opcodes.INVOKESPECIAL && traitStaticSuperAccessorName(mi.name) == method.name)
+
   private def superAccessorInvocation(method: MethodNode): Option[MethodInsnNode] =
-    findSingleCall(method, mi => mi.itf && mi.getOpcode == Opcodes.INVOKESTATIC && isTraitStaticSuperAccessorName(mi.name))
+    findSingleCall(method, mi => mi.itf && mi.getOpcode == Opcodes.INVOKESTATIC && mi.name == traitStaticSuperAccessorName(method.name))
+
+  private def isTraitSuperAccessor(method: MethodNode, owner: ClassBType): Boolean = {
+    owner.isInterface == Right(true) &&
+      BytecodeUtils.isStaticMethod(method) &&
+      traitMethodInvocation(method).nonEmpty
+  }
 
   private def isMixinForwarder(method: MethodNode, owner: ClassBType): Boolean = {
     owner.isInterface == Right(false) &&
       !BytecodeUtils.isStaticMethod(method) &&
-      (superAccessorInvocation(method) match {
-        case Some(mi) => mi.name == traitStaticSuperAccessorName(method.name)
-        case _ => false
-      })
+      superAccessorInvocation(method).nonEmpty
   }
 
   private def isTraitSuperAccessorOrMixinForwarder(method: MethodNode, owner: ClassBType): Boolean = {
@@ -161,13 +177,13 @@ class InlinerHeuristics[BT <: BTypes](val bTypes: BT) {
     if (isTraitSuperAccessorOrMixinForwarder(callsite.callsiteMethod, callsite.callsiteClass)) None
     else {
       val callee = callsite.callee.get
-      compilerSettings.YoptInlineHeuristics.value match {
+      compilerSettings.optInlineHeuristics match {
         case "everything" =>
-          val reason = if (compilerSettings.YoptLogInline.isSetByUser) "the inline strategy is \"everything\"" else null
+          val reason = if (compilerSettings.optLogInline.isDefined) "the inline strategy is \"everything\"" else null
           requestIfCanInline(callsite, reason)
 
         case "at-inline-annotated" =>
-          def reason = if (!compilerSettings.YoptLogInline.isSetByUser) null else {
+          def reason = if (!compilerSettings.optLogInline.isDefined) null else {
             val what = if (callee.annotatedInline) "callee" else "callsite"
             s"the $what is annotated `@inline`"
           }
@@ -175,7 +191,7 @@ class InlinerHeuristics[BT <: BTypes](val bTypes: BT) {
           else None
 
         case "default" =>
-          def reason = if (!compilerSettings.YoptLogInline.isSetByUser) null else {
+          def reason = if (!compilerSettings.optLogInline.isDefined) null else {
             if (callsite.isInlineAnnotated) {
               val what = if (callee.annotatedInline) "callee" else "callsite"
               s"the $what is annotated `@inline`"
@@ -336,4 +352,101 @@ class InlinerHeuristics[BT <: BTypes](val bTypes: BT) {
     ("javafx/util/Callback", "call(Ljava/lang/Object;)Ljava/lang/Object;")
   )
   def javaSam(internalName: InternalName): Option[String] = javaSams.get(internalName)
+}
+
+object InlinerHeuristics {
+  class InlineSourceMatcher(inlineFromSetting: List[String]) {
+    // `terminal` is true if all remaining entries are of the same negation as this one
+    case class Entry(pattern: Pattern, negated: Boolean, terminal: Boolean) {
+      def matches(internalName: InternalName): Boolean = pattern.matcher(internalName).matches()
+    }
+    private val patternStrings = inlineFromSetting.filterNot(_.isEmpty)
+    val startAllow: Boolean = patternStrings.headOption.contains("**")
+    private[this] var _allowFromSources: Boolean = false
+
+    val entries: List[Entry] = parse()
+
+    def allowFromSources = _allowFromSources
+
+    def allow(internalName: InternalName): Boolean = {
+      var answer = startAllow
+      @tailrec def check(es: List[Entry]): Boolean = es match {
+        case e :: rest =>
+          if (answer && e.negated && e.matches(internalName))
+            answer = false
+          else if (!answer && !e.negated && e.matches(internalName))
+            answer = true
+
+          if (e.terminal && answer != e.negated) answer
+          else check(rest)
+
+        case _ =>
+          answer
+      }
+      check(entries)
+    }
+
+    private def parse(): List[Entry] = {
+      var result = List.empty[Entry]
+
+      val patternsRevIterator = {
+        val it = patternStrings.reverseIterator
+        if (startAllow) it.take(patternStrings.length - 1) else it
+      }
+      for (p <- patternsRevIterator) {
+        if (p == "<sources>") _allowFromSources = true
+        else {
+          val len = p.length
+          var index = 0
+
+          def current = if (index < len) p.charAt(index) else 0.toChar
+
+          def next() = index += 1
+
+          val negated = current == '!'
+          if (negated) next()
+
+          val regex = new java.lang.StringBuilder
+
+          while (index < len) {
+            if (current == '*') {
+              next()
+              if (current == '*') {
+                next()
+                val starStarDot = current == '.'
+                if (starStarDot) {
+                  next()
+                  // special case: "a.**.C" matches "a.C", and "**.C" matches "C"
+                  val i = index - 4
+                  val allowEmpty = i < 0 || (i == 0 && p.charAt(i) == '!') || p.charAt(i) == '.'
+                  if (allowEmpty) regex.append("(?:.*/|)")
+                  else regex.append(".*/")
+                } else
+                  regex.append(".*")
+              } else {
+                regex.append("[^/]*")
+              }
+            } else if (current == '.') {
+              next()
+              regex.append('/')
+            } else {
+              val start = index
+              var needEscape = false
+              while (index < len && current != '.' && current != '*') {
+                needEscape = needEscape || "\\.[]{}()*+-?^$|".indexOf(current) != -1
+                next()
+              }
+              if (needEscape) regex.append("\\Q")
+              regex.append(p, start, index)
+              if (needEscape) regex.append("\\E")
+            }
+          }
+
+          val isTerminal = result.isEmpty || result.head.terminal && result.head.negated == negated
+          result ::= Entry(Pattern.compile(regex.toString), negated, isTerminal)
+        }
+      }
+      result
+    }
+  }
 }

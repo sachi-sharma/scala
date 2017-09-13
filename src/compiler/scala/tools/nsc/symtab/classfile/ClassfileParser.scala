@@ -76,8 +76,6 @@ abstract class ClassfileParser {
 
   def srcfile = srcfile0
 
-  private def optimized         = settings.optimise.value
-
   // u1, u2, and u4 are what these data types are called in the JVM spec.
   // They are an unsigned byte, unsigned char, and unsigned int respectively.
   // We bitmask u1 into an Int to make sure it's 0-255 (and u1 isn't used
@@ -367,7 +365,7 @@ abstract class ClassfileParser {
   }
 
   def stubClassSymbol(name: Name): Symbol = {
-    // SI-5593 Scaladoc's current strategy is to visit all packages in search of user code that can be documented
+    // scala/bug#5593 Scaladoc's current strategy is to visit all packages in search of user code that can be documented
     // therefore, it will rummage through the classpath triggering errors whenever it encounters package objects
     // that are not in their correct place (see bug for details)
 
@@ -380,15 +378,45 @@ abstract class ClassfileParser {
   }
 
   private def lookupClass(name: Name) = try {
-    if (name containsChar '.')
-      rootMirror getClassByName name
-    else
+    def lookupTopLevel = {
+      if (name containsChar '.')
+        rootMirror getClassByName name
+      else
       // FIXME - we shouldn't be doing ad hoc lookups in the empty package, getClassByName should return the class
-      definitions.getMember(rootMirror.EmptyPackageClass, name.toTypeName)
+        definitions.getMember(rootMirror.EmptyPackageClass, name.toTypeName)
+    }
+
+    // For inner classes we usually don't get here: `classNameToSymbol` already returns the symbol
+    // of the inner class based on the InnerClass table. However, if the classfile is missing the
+    // InnerClass entry for `name`, it might still be that there exists an inner symbol (because
+    // some other classfile _does_ have an InnerClass entry for `name`). In this case, we want to
+    // return the actual inner symbol (C.D, with owner C), not the top-level symbol C$D. This is
+    // what the logic below is for (see PR #5822 / scala/bug#9937).
+    val split = if (isScalaRaw) -1 else name.lastIndexOf('$')
+    if (split > 0 && split < name.length) {
+      val outerName = name.subName(0, split)
+      val innerName = name.subName(split + 1, name.length).toTypeName
+      val outerSym = classNameToSymbol(outerName)
+
+      // If the outer class C cannot be found, look for a top-level class C$D
+      if (outerSym.isInstanceOf[StubSymbol]) lookupTopLevel
+      else {
+        // We have a java-defined class name C$D and look for a member D of C. But we don't know if
+        // D is declared static or not, so we have to search both in class C and its companion.
+        val r = if (outerSym == clazz)
+          staticScope.lookup(innerName) orElse
+            instanceScope.lookup(innerName)
+        else
+          lookupMemberAtTyperPhaseIfPossible(outerSym, innerName) orElse
+            lookupMemberAtTyperPhaseIfPossible(outerSym.companionModule, innerName)
+        r orElse lookupTopLevel
+      }
+    } else
+      lookupTopLevel
   } catch {
     // The handler
-    //   - prevents crashes with deficient InnerClassAttributes (SI-2464, 0ce0ad5)
-    //   - was referenced in the bugfix commit for SI-3756 (4fb0d53), not sure why
+    //   - prevents crashes with deficient InnerClassAttributes (scala/bug#2464, 0ce0ad5)
+    //   - was referenced in the bugfix commit for scala/bug#3756 (4fb0d53), not sure why
     //   - covers the case when a type alias in a package object shadows a class symbol,
     //     getClassByName throws a MissingRequirementError (scala-dev#248)
     case _: FatalError =>
@@ -430,7 +458,7 @@ abstract class ClassfileParser {
       }
     }
 
-    val isTopLevel = !(currentClass containsChar '$') // Java class name; *don't* try to to use Scala name decoding (SI-7532)
+    val isTopLevel = !(currentClass containsChar '$') // Java class name; *don't* try to to use Scala name decoding (scala/bug#7532)
     if (isTopLevel) {
       val c = pool.getClassSymbol(nameIdx)
       // scala-dev#248: when a type alias (in a package object) shadows a class symbol, getClassSymbol returns a stub
@@ -504,7 +532,7 @@ abstract class ClassfileParser {
     val jflags = readFieldFlags()
     val sflags = jflags.toScalaFlags
 
-    if ((sflags & PRIVATE) != 0L && !optimized) {
+    if ((sflags & PRIVATE) != 0L) {
       in.skip(4); skipAttributes()
     } else {
       val name    = readName()
@@ -519,6 +547,7 @@ abstract class ClassfileParser {
       }
       propagatePackageBoundary(jflags, sym)
       parseAttributes(sym, info)
+      addJavaFlagsAnnotations(sym, jflags)
       getScope(jflags) enter sym
 
       // sealed java enums
@@ -541,13 +570,13 @@ abstract class ClassfileParser {
   def parseMethod() {
     val jflags = readMethodFlags()
     val sflags = jflags.toScalaFlags
-    if (jflags.isPrivate && !optimized) {
+    if (jflags.isPrivate) {
       val name = readName()
       if (name == nme.CONSTRUCTOR)
         sawPrivateConstructor = true
       in.skip(2); skipAttributes()
     } else {
-      if ((sflags & PRIVATE) != 0L && optimized) { // TODO this should be !optimized, no? See c4181f656d.
+      if ((sflags & PRIVATE) != 0L) {
         in.skip(4); skipAttributes()
       } else {
         val name = readName()
@@ -560,7 +589,7 @@ abstract class ClassfileParser {
               // if this is a non-static inner class, remove the explicit outer parameter
               val paramsNoOuter = innerClasses getEntry currentClass match {
                 case Some(entry) if !isScalaRaw && !entry.jflags.isStatic =>
-                  /* About `clazz.owner.hasPackageFlag` below: SI-5957
+                  /* About `clazz.owner.hasPackageFlag` below: scala/bug#5957
                    * For every nested java class A$B, there are two symbols in the scala compiler.
                    *  1. created by SymbolLoader, because of the existence of the A$B.class file, owner: package
                    *  2. created by ClassfileParser of A when reading the inner classes, owner: A
@@ -575,7 +604,7 @@ abstract class ClassfileParser {
               }
               val newParams = paramsNoOuter match {
                 case (init :+ tail) if jflags.isSynthetic =>
-                  // SI-7455 strip trailing dummy argument ("access constructor tag") from synthetic constructors which
+                  // scala/bug#7455 strip trailing dummy argument ("access constructor tag") from synthetic constructors which
                   // are added when an inner class needs to access a private constructor.
                   init
                 case _ =>
@@ -589,6 +618,7 @@ abstract class ClassfileParser {
         sym setInfo info
         propagatePackageBoundary(jflags, sym)
         parseAttributes(sym, info, removedOuterParameter)
+        addJavaFlagsAnnotations(sym, jflags)
         if (jflags.isVarargs)
           sym modifyInfo arrayToRepeated
 
@@ -846,13 +876,14 @@ abstract class ClassfileParser {
           if (isScalaAnnot || !isScala) {
             // For Scala classfiles we are only interested in the scala signature annotations. Other
             // annotations should be skipped (the pickle contains the symbol's annotations).
-            // Skipping them also prevents some spurious warnings / errors related to SI-7014,
-            // SI-7551, pos/5165b
+            // Skipping them also prevents some spurious warnings / errors related to scala/bug#7014,
+            // scala/bug#7551, pos/5165b
             val scalaSigAnnot = parseAnnotations(onlyScalaSig = isScalaAnnot)
             if (isScalaAnnot) scalaSigAnnot match {
               case Some(san: AnnotationInfo) =>
                 val bytes =
                   san.assocs.find({ _._1 == nme.bytes }).get._2.asInstanceOf[ScalaSigBytes].bytes
+
                 unpickler.unpickle(bytes, 0, clazz, staticModule, in.file.name)
               case None =>
                 throw new RuntimeException("Scala class file does not contain Scala annotation")
@@ -872,13 +903,26 @@ abstract class ClassfileParser {
           parseExceptions(attrLen)
 
         case tpnme.SourceFileATTR =>
-          val srcfileLeaf = readName().toString.trim
-          val srcpath = sym.enclosingPackage match {
-            case NoSymbol => srcfileLeaf
-            case rootMirror.EmptyPackage => srcfileLeaf
-            case pkg => pkg.fullName(File.separatorChar)+File.separator+srcfileLeaf
-          }
-          srcfile0 = settings.outputDirs.srcFilesFor(in.file, srcpath).find(_.exists)
+          if (forInteractive) {
+            // opt: disable this code in the batch compiler for performance reasons.
+            // it appears to be looking for the .java source file mentioned in this attribute
+            // in the output directories of scalac.
+            //
+            // References:
+            // https://issues.scala-lang.org/browse/SI-2689
+            // https://github.com/scala/scala/commit/7315339782f6e19ddd6199768352a91ef66eb27d
+            // https://github.com/scala-ide/scala-ide/commit/786ea5d4dc44065379a05eb3ac65d37f8948c05d
+            //
+            // TODO: can we disable this altogether? Does Scala-IDE actually intermingle source and classfiles in a way
+            //       that this could ever find something?
+            val srcfileLeaf = readName().toString.trim
+            val srcpath = sym.enclosingPackage match {
+              case NoSymbol => srcfileLeaf
+              case rootMirror.EmptyPackage => srcfileLeaf
+              case pkg => pkg.fullName(File.separatorChar)+File.separator+srcfileLeaf
+            }
+            srcfile0 = settings.outputDirs.srcFilesFor(in.file, srcpath).find(_.exists)
+          } else in.skip(attrLen)
         case tpnme.CodeATTR =>
           if (sym.owner.isInterface) {
             sym setFlag JAVA_DEFAULTMETHOD
@@ -926,7 +970,7 @@ abstract class ClassfileParser {
           val s = module.info.decls.lookup(n)
           if (s != NoSymbol) Some(LiteralAnnotArg(Constant(s)))
           else {
-            warning(s"""While parsing annotations in ${in.file}, could not find $n in enum $module.\nThis is likely due to an implementation restriction: an annotation argument cannot refer to a member of the annotated class (SI-7014).""")
+            warning(s"""While parsing annotations in ${in.file}, could not find $n in enum $module.\nThis is likely due to an implementation restriction: an annotation argument cannot refer to a member of the annotated class (scala/bug#7014).""")
             None
           }
 
@@ -964,7 +1008,7 @@ abstract class ClassfileParser {
       Some(ScalaSigBytes(pool.getBytes(entries.toList)))
     }
 
-    // TODO SI-9296 duplicated code, refactor
+    // TODO scala/bug#9296 duplicated code, refactor
     /* Parse and return a single annotation.  If it is malformed,
      * return None.
      */
@@ -1018,10 +1062,10 @@ abstract class ClassfileParser {
     def parseExceptions(len: Int) {
       val nClasses = u2
       for (n <- 0 until nClasses) {
-        // FIXME: this performs an equivalent of getExceptionTypes instead of getGenericExceptionTypes (SI-7065)
+        // FIXME: this performs an equivalent of getExceptionTypes instead of getGenericExceptionTypes (scala/bug#7065)
         val cls = pool.getClassSymbol(u2)
         // we call initialize due to the fact that we call Symbol.isMonomorphicType in addThrowsAnnotation
-        // and that method requires Symbol to be forced to give the right answers, see SI-7107 for details
+        // and that method requires Symbol to be forced to give the right answers, see scala/bug#7107 for details
         cls.initialize
         sym.addThrowsAnnotation(cls)
       }
@@ -1047,6 +1091,12 @@ abstract class ClassfileParser {
     // begin parseAttributes
     for (i <- 0 until u2) parseAttribute()
   }
+
+  /** Apply `@native`/`@transient`/`@volatile` annotations to `sym`,
+    * if the corresponding flag is set in `flags`.
+    */
+  def addJavaFlagsAnnotations(sym: Symbol, flags: JavaAccFlags): Unit =
+    flags.toScalaAnnotations(symbolTable) foreach (ann => sym.addAnnotation(ann))
 
   /** Enter own inner classes in the right scope. It needs the scopes to be set up,
    *  and implicitly current class' superclasses.
@@ -1076,7 +1126,8 @@ abstract class ClassfileParser {
         cls setInfo completer
         mod setInfo completer
         mod.moduleClass setInfo loaders.moduleClassLoader
-        List(cls, mod.moduleClass) foreach (_.associatedFile = file)
+        cls.associatedFile = file
+        mod.moduleClass.associatedFile = file
         (cls, mod)
       }
 

@@ -9,10 +9,11 @@ package classfile
 
 import java.lang.Float.floatToIntBits
 import java.lang.Double.doubleToLongBits
+
 import scala.io.Codec
-import scala.reflect.internal.pickling.{ PickleBuffer, PickleFormat }
+import scala.reflect.internal.pickling.{PickleBuffer, PickleFormat}
 import scala.reflect.internal.util.shortClassOfInstance
-import scala.collection.mutable.LinkedHashMap
+import scala.collection.mutable
 import PickleFormat._
 import Flags._
 
@@ -83,7 +84,7 @@ abstract class Pickler extends SubComponent {
     private val rootOwner = root.owner
     private var entries   = new Array[AnyRef](256)
     private var ep        = 0
-    private val index     = new LinkedHashMap[AnyRef, Int]
+    private val index     = new mutable.AnyRefMap[AnyRef, Int]
     private lazy val nonClassRoot = findSymbol(root.ownersIterator)(!_.isClass)
 
     private def isRootSym(sym: Symbol) =
@@ -93,7 +94,7 @@ abstract class Pickler extends SubComponent {
      *  for existentially bound variables that have a non-local owner.
      *  Question: Should this be done for refinement class symbols as well?
      *
-     *  Note: tree pickling also finds its way here; e.g. in SI-7501 the pickling
+     *  Note: tree pickling also finds its way here; e.g. in scala/bug#7501 the pickling
      *  of trees in annotation arguments considers the parameter symbol of a method
      *  called in such a tree as "local". The condition `sym.isValueParameter` was
      *  added to fix that bug, but there may be a better way.

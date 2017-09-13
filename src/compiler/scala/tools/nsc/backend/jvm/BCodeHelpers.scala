@@ -12,6 +12,7 @@ import scala.tools.nsc.io.AbstractFile
 import GenBCode._
 import BackendReporting._
 import scala.reflect.internal.Flags
+import scala.tools.nsc.reporters.NoReporter
 
 /*
  *  Traits encapsulating functionality to convert Scala AST Trees into ASM ClassNodes.
@@ -20,11 +21,12 @@ import scala.reflect.internal.Flags
  *  @version 1.0
  *
  */
-abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
+abstract class BCodeHelpers extends BCodeIdiomatic {
   import global._
   import definitions._
   import bTypes._
   import coreBTypes._
+  import genBCode.postProcessor.backendUtils
   import BTypes.{InternalName, InlineInfo, MethodInlineInfo}
 
   /**
@@ -86,7 +88,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
     // phase travel necessary: after flatten, the name includes the name of outer classes.
     // if some outer name contains $anon, a non-anon class is considered anon.
     if (delambdafyInline() && exitingPickler(sym.rawowner.isAnonymousFunction)) {
-      // SI-9105: special handling for anonymous functions under delambdafy:inline.
+      // scala/bug#9105: special handling for anonymous functions under delambdafy:inline.
       //
       //   class C { def t = () => { def f { class Z } } }
       //
@@ -197,7 +199,6 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
     if (isAnonymousOrLocalClass(classSym) && !considerAsTopLevelImplementationArtifact(classSym)) {
       val enclosingClass = enclosingClassForEnclosingMethodAttribute(classSym)
       val methodOpt = enclosingMethodForEnclosingMethodAttribute(classSym)
-      for (m <- methodOpt) assert(m.owner == enclosingClass, s"the owner of the enclosing method ${m.locationString} should be the same as the enclosing class $enclosingClass")
       Some(EnclosingMethodEntry(
         classDesc(enclosingClass),
         methodOpt.map(_.javaSimpleName.toString).orNull,
@@ -220,7 +221,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
     sym.isPackageClass || sym.isModuleClass && isOriginallyStaticOwner(sym.originalOwner)
 
   /**
-   * This is a hack to work around SI-9111. The completer of `methodSym` may report type errors. We
+   * This is a hack to work around scala/bug#9111. The completer of `methodSym` may report type errors. We
    * cannot change the typer context of the completer at this point and make it silent: the context
    * captured when creating the completer in the namer. However, we can temporarily replace
    * global.reporter (it's a var) to store errors.
@@ -228,65 +229,14 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
   def completeSilentlyAndCheckErroneous(sym: Symbol): Boolean =
     if (sym.hasCompleteInfo) false
     else {
-      val originalReporter = global.reporter
-      val storeReporter = new reporters.StoreReporter()
-      global.reporter = storeReporter
-      try {
-        sym.info
-      } finally {
-        global.reporter = originalReporter
-      }
+      withoutReporting(sym.info)
       sym.isErroneous
     }
 
-
-  /*
-   * must-single-thread
-   */
-  def getFileForClassfile(base: AbstractFile, clsName: String, suffix: String): AbstractFile = {
-    getFile(base, clsName, suffix)
-  }
-
-  /*
-   * must-single-thread
-   */
-  def getOutFolder(csym: Symbol, cName: String, cunit: CompilationUnit): _root_.scala.tools.nsc.io.AbstractFile =
-    _root_.scala.util.Try {
-      outputDirectory(csym)
-    }.recover {
-      case ex: Throwable =>
-        reporter.error(cunit.body.pos, s"Couldn't create file for class $cName\n${ex.getMessage}")
-        null
-    }.get
-
-  var pickledBytes = 0 // statistics
-
-  // -----------------------------------------------------------------------------------------
-  // finding the least upper bound in agreement with the bytecode verifier (given two internal names handed by ASM)
-  // Background:
-  //  http://gallium.inria.fr/~xleroy/publi/bytecode-verification-JAR.pdf
-  //  http://comments.gmane.org/gmane.comp.java.vm.languages/2293
-  //  https://issues.scala-lang.org/browse/SI-3872
-  // -----------------------------------------------------------------------------------------
-
-  /*  An `asm.ClassWriter` that uses `jvmWiseLUB()`
-   *  The internal name of the least common ancestor of the types given by inameA and inameB.
-   *  It's what ASM needs to know in order to compute stack map frames, http://asm.ow2.org/doc/developer-guide.html#controlflow
-   */
-  final class CClassWriter(flags: Int) extends asm.ClassWriter(flags) {
-
-    /**
-     * This method is thread-safe: it depends only on the BTypes component, which does not depend
-     * on global. TODO @lry move to a different place where no global is in scope, on bTypes.
-     */
-    override def getCommonSuperClass(inameA: String, inameB: String): String = {
-      val a = classBTypeFromInternalName(inameA)
-      val b = classBTypeFromInternalName(inameB)
-      val lub = a.jvmWiseLUB(b).get
-      val lubName = lub.internalName
-      assert(lubName != "scala/Any")
-      lubName // ASM caches the answer during the lifetime of a ClassWriter. We outlive that. Not sure whether caching on our side would improve things.
-    }
+  @inline private def withoutReporting[T](fn : => T) = {
+    val currentReporter = reporter
+    reporter = NoReporter
+    try fn finally reporter = currentReporter
   }
 
   /*
@@ -356,33 +306,6 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
   }
 
   /*
-   * must-single-thread
-   */
-  def initBytecodeWriter(entryPoints: List[Symbol]): BytecodeWriter = {
-    settings.outputDirs.getSingleOutput match {
-      case Some(f) if f hasExtension "jar" =>
-        // If no main class was specified, see if there's only one
-        // entry point among the classes going into the jar.
-        if (settings.mainClass.isDefault) {
-          entryPoints map (_.fullName('.')) match {
-            case Nil      =>
-              log("No Main-Class designated or discovered.")
-            case name :: Nil =>
-              log(s"Unique entry point: setting Main-Class to $name")
-              settings.mainClass.value = name
-            case names =>
-              log(s"No Main-Class due to multiple entry points:\n  ${names.mkString("\n  ")}")
-          }
-        }
-        else log(s"Main-Class was specified: ${settings.mainClass.value}")
-
-        new DirectToJarfileWriter(f.file)
-
-      case _ => factoryNonJarBytecodeWriter()
-    }
-  }
-
-  /*
    *  must-single-thread
    */
   def fieldSymbols(cls: Symbol): List[Symbol] = {
@@ -403,29 +326,6 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
    */
   def serialVUID(csym: Symbol): Option[Long] = csym getAnnotation definitions.SerialVersionUIDAttr collect {
     case AnnotationInfo(_, _, (_, LiteralAnnotArg(const)) :: Nil) => const.longValue
-  }
-
-  /*
-   * Populates the InnerClasses JVM attribute with `refedInnerClasses`. See also the doc on inner
-   * classes in BTypes.scala.
-   *
-   * `refedInnerClasses` may contain duplicates, need not contain the enclosing inner classes of
-   * each inner class it lists (those are looked up and included).
-   *
-   * This method serializes in the InnerClasses JVM attribute in an appropriate order, not
-   * necessarily that given by `refedInnerClasses`.
-   *
-   * can-multi-thread
-   */
-  final def addInnerClasses(jclass: asm.ClassVisitor, refedInnerClasses: List[ClassBType]) {
-    val allNestedClasses = refedInnerClasses.flatMap(_.enclosingNestedClassesChain.get).distinct
-
-    // sorting ensures nested classes are listed after their enclosing class thus satisfying the Eclipse Java compiler
-    for (nestedClass <- allNestedClasses.sortBy(_.internalName.toString)) {
-      // Extract the innerClassEntry - we know it exists, enclosingNestedClassesChain only returns nested classes.
-      val Some(e) = nestedClass.innerClassAttributeEntry.get
-      jclass.visitInnerClass(e.name, e.outerName, e.innerName, e.flags)
-    }
   }
 
   /*
@@ -499,12 +399,11 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
      */
     def getAnnotPickle(jclassName: String, sym: Symbol): Option[AnnotationInfo] = {
       currentRun.symData get sym match {
-        case Some(pickle) if !nme.isModuleName(newTermName(jclassName)) =>
+        case Some(pickle) if !sym.isModuleClass =>
           val scalaAnnot = {
             val sigBytes = ScalaSigBytes(pickle.bytes.take(pickle.writeIndex))
             AnnotationInfo(sigBytes.sigAnnot, Nil, (nme.bytes, sigBytes) :: Nil)
           }
-          pickledBytes += pickle.writeIndex
           currentRun.symData -= sym
           currentRun.symData -= sym.companionSymbol
           Some(scalaAnnot)
@@ -579,7 +478,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
         case Some(retentionAnnot) =>
           retentionAnnot.assocs.contains(nme.value -> LiteralAnnotArg(Constant(AnnotationRetentionPolicyRuntimeValue)))
         case _ =>
-          // SI-8926: if the annotation class symbol doesn't have a @RetentionPolicy annotation, the
+          // scala/bug#8926: if the annotation class symbol doesn't have a @RetentionPolicy annotation, the
           // annotation is emitted with visibility `RUNTIME`
           true
       }
@@ -803,7 +702,17 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
     def getGenericSignature(sym: Symbol, owner: Symbol, memberTpe: Type): String = {
       if (!needsGenericSignature(sym)) { return null }
 
-      val jsOpt: Option[String] = erasure.javaSig(sym, memberTpe)
+      // Make sure to build (and cache) a ClassBType for every type that is referenced in
+      // a generic signature. Otherwise, looking up the type later (when collecting nested
+      // classes, or when computing stack map frames) might fail.
+      def enterReferencedClass(sym: Symbol): Unit = enteringJVM(classBTypeFromSymbol(sym))
+
+      val erasedTypeSym = sym.info.typeSymbol
+      val jsOpt: Option[String] =
+        if (erasedTypeSym.isPrimitiveValueClass)
+          None // scala/bug#10351: don't emit a signature if field tp erases to a primitive
+        else
+          erasure.javaSig(sym, memberTpe, enterReferencedClass)
       if (jsOpt.isEmpty) { return null }
 
       val sig = jsOpt.get
@@ -828,13 +737,13 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
           reporter.warning(sym.pos,
             sm"""|compiler bug: created invalid generic signature for $sym in ${sym.owner.skipPackageObject.fullName}
                  |signature: $sig
-                 |if this is reproducible, please report bug at https://issues.scala-lang.org/
+                 |if this is reproducible, please report bug at https://github.com/scala/bug/issues
               """.trim)
           return null
         }
       }
 
-      if ((settings.check containsName phaseName)) {
+      if (settings.check containsName genBCode.phaseName) {
         val normalizedTpe = enteringErasure(erasure.prepareSigMap(memberTpe))
         val bytecodeTpe = owner.thisType.memberInfo(sym)
         if (!sym.isType && !sym.isConstructor && !(erasure.erasure(sym)(normalizedTpe) =:= bytecodeTpe)) {
@@ -844,7 +753,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
                  |original type: $memberTpe
                  |normalized type: $normalizedTpe
                  |erasure type: $bytecodeTpe
-                 |if this is reproducible, please report bug at http://issues.scala-lang.org/
+                 |if this is reproducible, please report bug at https://github.com/scala/bug/issues
               """.trim)
            return null
         }
@@ -886,7 +795,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
      */
     private def addForwarder(isRemoteClass: Boolean, jclass: asm.ClassVisitor, moduleClass: Symbol, m: Symbol): Unit = {
       def staticForwarderGenericSignature: String = {
-        // SI-3452 Static forwarder generation uses the same erased signature as the method if forwards to.
+        // scala/bug#3452 Static forwarder generation uses the same erased signature as the method if forwards to.
         // By rights, it should use the signature as-seen-from the module class, and add suitable
         // primitive and value-class boxing/unboxing.
         // But for now, just like we did in mixin, we just avoid writing a wrong generic signature
@@ -905,7 +814,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
 
       /* Forwarders must not be marked final,
        *  as the JVM will not allow redefinition of a final static method,
-       *  and we don't know what classes might be subclassing the companion class.  See SI-4827.
+       *  and we don't know what classes might be subclassing the companion class.  See scala/bug#4827.
        */
       // TODO: evaluate the other flags we might be dropping on the floor here.
       // TODO: ACC_SYNTHETIC ?
@@ -1052,7 +961,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
       val bType = mirrorClassClassBType(moduleClass)
       val mirrorClass = new asm.tree.ClassNode
       mirrorClass.visit(
-        classfileVersion,
+        backendUtils.classfileVersion.get,
         bType.info.get.flags,
         bType.internalName,
         null /* no java-generic-signature */,
@@ -1096,7 +1005,7 @@ abstract class BCodeHelpers extends BCodeIdiomatic with BytecodeWriters {
 
       val beanInfoClass = new asm.tree.ClassNode
       beanInfoClass.visit(
-        classfileVersion,
+        backendUtils.classfileVersion.get,
         beanInfoType.info.get.flags,
         beanInfoType.internalName,
         null, // no java-generic-signature

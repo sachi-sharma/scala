@@ -55,7 +55,7 @@ object Duration {
       case "Inf" | "PlusInf" | "+Inf" => Inf
       case "MinusInf" | "-Inf"        => MinusInf
       case _                          =>
-        val unitName = s1.reverse.takeWhile(_.isLetter).reverse;
+        val unitName = s1.reverse.takeWhile(_.isLetter).reverse
         timeUnit get unitName match {
           case Some(unit) =>
             val valueStr = s1 dropRight unitName.length
@@ -125,7 +125,7 @@ object Duration {
     else if (nanos > Long.MaxValue || nanos < Long.MinValue)
       throw new IllegalArgumentException("trying to construct too large duration with " + nanos + "ns")
     else
-      fromNanos((nanos + 0.5).toLong)
+      fromNanos(nanos.round)
   }
 
   private[this] final val  µs_per_ns = 1000L
@@ -636,7 +636,7 @@ final class FiniteDuration(val length: Long, val unit: TimeUnit) extends Duratio
     else if (JDouble.isNaN(divisor)) Undefined
     else Zero
 
-  // if this is made a constant, then scalac will elide the conditional and always return +0.0, SI-6331
+  // if this is made a constant, then scalac will elide the conditional and always return +0.0, scala/bug#6331
   private[this] def minusZero = -0d
   def /(divisor: Duration): Double =
     if (divisor.isFinite()) toNanos.toDouble / divisor.toNanos

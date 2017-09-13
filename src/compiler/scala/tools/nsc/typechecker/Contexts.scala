@@ -91,7 +91,7 @@ trait Contexts { self: Analyzer =>
     if (settings.noimports) Nil
     else if (unit.isJava) RootImports.javaList
     else if (settings.nopredef || treeInfo.noPredefImportForUnit(unit.body)) {
-      // SI-8258 Needed for the presentation compiler using -sourcepath, otherwise cycles can occur. See the commit
+      // scala/bug#8258 Needed for the presentation compiler using -sourcepath, otherwise cycles can occur. See the commit
       //         message for this ticket for an example.
       debuglog("Omitted import of Predef._ for " + unit)
       RootImports.javaAndScalaList
@@ -237,6 +237,9 @@ trait Contexts { self: Analyzer =>
 
     /** Types for which implicit arguments are currently searched */
     var openImplicits: List[OpenImplicit] = List()
+    final def isSearchingForImplicitParam: Boolean = {
+      openImplicits.nonEmpty && openImplicits.exists(x => !x.isView)
+    }
 
     /* For a named application block (`Tree`) the corresponding `NamedApplyInfo`. */
     var namedApplyBlockInfo: Option[(Tree, NamedApplyInfo)] = None
@@ -452,7 +455,7 @@ trait Contexts { self: Analyzer =>
         case _         => false
       }
       val isImport = tree match {
-        // The guard is for SI-8403. It prevents adding imports again in the context created by
+        // The guard is for scala/bug#8403. It prevents adding imports again in the context created by
         // `Namer#createInnerNamer`
         case _: Import if tree != this.tree => true
         case _                              => false
@@ -480,7 +483,7 @@ trait Contexts { self: Analyzer =>
       c.enclClass          = if (isTemplateOrPackage) c else enclClass
       c(ConstructorSuffix) = !isTemplateOrPackage && c(ConstructorSuffix)
 
-      // SI-8245 `isLazy` need to skip lazy getters to ensure `return` binds to the right place
+      // scala/bug#8245 `isLazy` need to skip lazy getters to ensure `return` binds to the right place
       c.enclMethod         = if (isDefDef && !owner.isLazy) c else enclMethod
 
       if (tree != outer.tree)
@@ -503,7 +506,7 @@ trait Contexts { self: Analyzer =>
     }
 
     def make(tree: Tree, owner: Symbol, scope: Scope): Context =
-      // TODO SI-7345 Moving this optimization into the main overload of `make` causes all tests to fail.
+      // TODO scala/bug#7345 Moving this optimization into the main overload of `make` causes all tests to fail.
       //              even if it is extended to check that `unit == this.unit`. Why is this?
       if (tree == this.tree && owner == this.owner && scope == this.scope) this
       else make(tree, owner, scope, unit)
@@ -732,14 +735,23 @@ trait Contexts { self: Analyzer =>
         || sym.isProtected &&
              (  superAccess
              || pre.isInstanceOf[ThisType]
-             || phase.erasedTypes
+             || phase.erasedTypes // (*)
              || (sym.overrideChain exists isProtectedAccessOK)
                 // that last condition makes protected access via self types work.
              )
         )
-        // note: phase.erasedTypes disables last test, because after addinterfaces
-        // implementation classes are not in the superclass chain. If we enable the
-        // test, bug780 fails.
+        // (*) in t780.scala: class B extends A { protected val x }; trait A { self: B => x }
+        // Before erasure, the `pre` is a `ThisType`, so the access is allowed. Erasure introduces
+        // a cast to access `x` (this.$asInstanceOf[B].x), then `pre` is no longer a `ThisType`
+        // but a `TypeRef` to `B`.
+        // Note that `isProtectedAccessOK` is false, it checks if access is OK in the current
+        // context's owner (trait `A`), not in the `pre` type.
+        // This implementation makes `isAccessible` return false positives. Maybe the idea is to
+        // represent VM-level information, as we don't emit protected? If so, it's wrong for
+        // Java-defined symbols, which can be protected in bytecode. History:
+        //   - Phase check added in 8243b2dd2d
+        //   - Removed in 1536b1c67e, but moved to `accessBoundary`
+        //   - Re-added in 42744ffda0 (and left in `accessBoundary`)
       }
     }
 
@@ -847,11 +859,11 @@ trait Contexts { self: Analyzer =>
       collect(imp.tree.selectors)
     }
 
-    /* SI-5892 / SI-4270: `implicitss` can return results which are not accessible at the
+    /* scala/bug#5892 / scala/bug#4270: `implicitss` can return results which are not accessible at the
      * point where implicit search is triggered. Example: implicits in (annotations of)
-     * class type parameters (SI-5892). The `context.owner` is the class symbol, therefore
+     * class type parameters (scala/bug#5892). The `context.owner` is the class symbol, therefore
      * `implicitss` will return implicit conversions defined inside the class. These are
-     * filtered out later by `eligibleInfos` (SI-4270 / 9129cfe9), as they don't type-check.
+     * filtered out later by `eligibleInfos` (scala/bug#4270 / 9129cfe9), as they don't type-check.
      */
     def implicitss: List[List[ImplicitInfo]] = {
       val nextOuter = this.nextOuter
@@ -1045,7 +1057,7 @@ trait Contexts { self: Analyzer =>
         logResult(s"overloaded symbol in $pre")(owner.newOverloaded(pre, entries map (_.sym)))
 
       // Constructor lookup should only look in the decls of the enclosing class
-      // not in the self-type, nor in the enclosing context, nor in imports (SI-4460, SI-6745)
+      // not in the self-type, nor in the enclosing context, nor in imports (scala/bug#4460, scala/bug#6745)
       if (name == nme.CONSTRUCTOR) return {
         val enclClassSym = cx.enclClass.owner
         val scope = cx.enclClass.prefix.baseType(enclClassSym).decls
@@ -1353,7 +1365,7 @@ trait Contexts { self: Analyzer =>
       _warningBuffer = null
     }
 
-    // [JZ] Contexts, pre- the SI-7345 refactor, avoided allocating the buffers until needed. This
+    // [JZ] Contexts, pre- the scala/bug#7345 refactor, avoided allocating the buffers until needed. This
     // is replicated here out of conservatism.
     private def newBuffer[A]    = mutable.LinkedHashSet.empty[A] // Important to use LinkedHS for stable results.
     final protected def errorBuffer   = { if (_errorBuffer == null) _errorBuffer = newBuffer; _errorBuffer }
@@ -1456,7 +1468,7 @@ trait Contexts { self: Analyzer =>
       if (record && settings.warnUnusedImport && selectors.nonEmpty && result != NoSymbol && pos != NoPosition)
         recordUsage(current, result)
 
-      // Harden against the fallout from bugs like SI-6745
+      // Harden against the fallout from bugs like scala/bug#6745
       //
       // [JZ] I considered issuing a devWarning and moving the
       //      check inside the above loop, as I believe that

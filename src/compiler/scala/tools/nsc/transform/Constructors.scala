@@ -734,7 +734,7 @@ abstract class Constructors extends Statics with Transform with TypingTransforme
       // Return a pair consisting of (all statements up to and including superclass and trait constr calls, rest)
       def splitAtSuper(stats: List[Tree]) = {
         def isConstr(tree: Tree): Boolean = tree match {
-          case Block(_, expr) => isConstr(expr) // SI-6481 account for named argument blocks
+          case Block(_, expr) => isConstr(expr) // scala/bug#6481 account for named argument blocks
           case _              => (tree.symbol ne null) && tree.symbol.isConstructor
         }
         val (pre, rest0)       = stats span (!isConstr(_))
@@ -764,7 +764,7 @@ abstract class Constructors extends Statics with Transform with TypingTransforme
           primaryConstrBody.expr)
       })
 
-      if (omittableAccessor.exists(_.isOuterField) && !constructorStats.exists(_.exists { case i: Ident if i.symbol.isOuterParam => true; case _ => false}))
+      if ((exitingPickler(clazz.isAnonymousClass) || clazz.originalOwner.isTerm) && omittableAccessor.exists(_.isOuterField) && !constructorStats.exists(_.exists { case i: Ident if i.symbol.isOuterParam => true; case _ => false}))
         primaryConstructor.symbol.updateAttachment(OuterArgCanBeElided)
 
       val constructors = primaryConstructor :: auxConstructors
@@ -782,8 +782,8 @@ abstract class Constructors extends Statics with Transform with TypingTransforme
         if (settings.checkInit) {
           val addChecks = new SynthInitCheckedAccessorsIn(currentOwner)
           prunedStats mapConserve {
-            case dd: DefDef => deriveDefDef(dd)(addChecks.wrapRhsWithInitChecks(dd.symbol))
-            case stat       => stat
+            case dd: DefDef if addChecks.needsWrapping(dd) => deriveDefDef(dd)(addChecks.wrapRhsWithInitChecks(dd.symbol))
+            case stat                                      => stat
           }
         } else prunedStats
 

@@ -11,7 +11,8 @@ import java.lang.{Class => jClass, Package => jPackage}
 import java.lang.reflect.{
   Method => jMethod, Constructor => jConstructor, Field => jField,
   Member => jMember, Type => jType, TypeVariable => jTypeVariable,
-  GenericDeclaration, GenericArrayType, ParameterizedType, WildcardType, AnnotatedElement }
+  Modifier => jModifier, GenericDeclaration, GenericArrayType,
+  ParameterizedType, WildcardType, AnnotatedElement }
 import java.lang.annotation.{Annotation => jAnnotation}
 import java.io.IOException
 import scala.reflect.internal.{ MissingRequirementError, JavaAccFlags }
@@ -406,7 +407,7 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
     }
 
     // caches MethodSymbol metadata, so that we minimize the work that needs to be done during Mirror.apply
-    // TODO: vararg is only supported in the last parameter list (SI-6182), so we don't need to worry about the rest for now
+    // TODO: vararg is only supported in the last parameter list (scala/bug#6182), so we don't need to worry about the rest for now
     private class MethodMetadata(symbol: MethodSymbol) {
       private val params = symbol.paramss.flatten.toArray
       private val vcMetadata = params.map(p => new DerivedValueClassMetadata(p.info))
@@ -451,7 +452,7 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
         val params = symbol.paramss.flatten
         val perfectMatch = args.length == params.length
         // todo. this doesn't account for multiple vararg parameter lists
-        // however those aren't supported by the mirror API: https://issues.scala-lang.org/browse/SI-6182
+        // however those aren't supported by the mirror API: https://github.com/scala/bug/issues/6182
         // hence I leave this code as is, to be fixed when the corresponding bug is fixed
         val varargMatch = args.length >= params.length - 1 && isVarArgsList(params)
         if (!perfectMatch && !varargMatch) {
@@ -552,7 +553,7 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
     }
 
     def javaClass(path: String): jClass[_] =
-      jClass.forName(path, true, classLoader)
+      jClass.forName(path, false, classLoader)
 
     /** Does `path` correspond to a Java class with that fully qualified name in the current class loader? */
     def tryJavaClass(path: String): Option[jClass[_]] = (
@@ -591,7 +592,7 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
       // don't use classOf[scala.reflect.ScalaSignature] here, because it will use getClass.getClassLoader, not mirror's classLoader
       // don't use asInstanceOf either because of the same reason (lol, I cannot believe I fell for it)
       // don't use structural types to simplify reflective invocations because of the same reason
-      // TODO SI-9296 duplicated code, refactor
+      // TODO scala/bug#9296 duplicated code, refactor
       def loadAnnotation(name: String): Option[java.lang.annotation.Annotation] =
         tryJavaClass(name) flatMap { annotClass =>
           val anns = jclazz.getAnnotations
@@ -675,19 +676,24 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
 
     /**
      * Copy all annotations of Java annotated element `jann` over to Scala symbol `sym`.
-     * Also creates `@throws` annotations if necessary.
+     * Also creates `@throws`, `@transient`, `@native`, and `@volatile` annotations if necessary.
      *  Pre: `sym` is already initialized with a concrete type.
      *  Note: If `sym` is a method or constructor, its parameter annotations are copied as well.
      */
     private def copyAnnotations(sym: Symbol, jann: AnnotatedElement) {
       sym setAnnotations (jann.getAnnotations map JavaAnnotationProxy).toList
-      // SI-7065: we're not using getGenericExceptionTypes here to be consistent with ClassfileParser
+      // scala/bug#7065: we're not using getGenericExceptionTypes here to be consistent with ClassfileParser
       val jexTpes = jann match {
         case jm: jMethod              => jm.getExceptionTypes.toList
         case jconstr: jConstructor[_] => jconstr.getExceptionTypes.toList
         case _                        => Nil
       }
       jexTpes foreach (jexTpe => sym.addThrowsAnnotation(classSymbol(jexTpe)))
+      jann match {
+        case mem: jMember =>
+          mem.javaFlags.toScalaAnnotations(thisUniverse) foreach (ann => sym.addAnnotation(ann))
+        case _ =>
+      }
     }
 
     private implicit class jClassOps(val clazz: jClass[_]) {
@@ -808,7 +814,7 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
     private def followStatic(clazz: Symbol, mods: JavaAccFlags): Symbol = followStatic(clazz, clazz.companionModule, mods)
 
     private def followStatic(clazz: Symbol, module: Symbol, mods: JavaAccFlags): Symbol =
-      // SI-8196 `orElse(clazz)` needed for implementation details of the backend, such as the static
+      // scala/bug#8196 `orElse(clazz)` needed for implementation details of the backend, such as the static
       //         field containing the cache for structural calls.
       if (mods.isStatic) module.moduleClass.orElse(clazz) else clazz
 
@@ -1215,10 +1221,10 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
         val childOfTopLevel       = clazz.owner.isTopLevel
         val childOfTopLevelObject = clazz.owner.isModuleClass && childOfTopLevel
 
-        // suggested in https://issues.scala-lang.org/browse/SI-4023?focusedCommentId=54759#comment-54759
+        // suggested in https://github.com/scala/bug/issues/4023#issuecomment-292387855
         var ownerClazz = classToJava(clazz.owner.asClass)
         if (childOfTopLevelObject)
-          ownerClazz = jClass.forName(ownerClazz.getName stripSuffix "$", true, ownerClazz.getClassLoader)
+          ownerClazz = jClass.forName(ownerClazz.getName stripSuffix "$", false, ownerClazz.getClassLoader)
 
         val ownerChildren = ownerClazz.getDeclaredClasses
 
@@ -1226,7 +1232,7 @@ private[scala] trait JavaMirrors extends internal.SymbolTable with api.JavaUnive
         if (childOfClass || childOfTopLevel) fullNameOfJavaClass += "$"
         fullNameOfJavaClass += clazz.name
 
-        // compactify (see SI-7779)
+        // compactify (see scala/bug#7779)
         fullNameOfJavaClass = fullNameOfJavaClass match {
           case PackageAndClassPattern(pack, clazzName) =>
             // in a package

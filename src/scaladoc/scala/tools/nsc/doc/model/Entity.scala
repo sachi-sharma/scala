@@ -515,7 +515,7 @@ trait ImplicitConversion {
  *     in this case, it won't be possible to call the member directly, the type checker will fail attempting to adapt
  *     the call arguments (or if they fit it will call the original class method)
  *  2) shadowing from other possible implicit conversions ()
- *     this will result in an ambiguous implicit converion error
+ *     this will result in an ambiguous implicit conversion error
  */
 trait ImplicitMemberShadowing {
   /** The members that shadow the current entry use .inTemplate to get to the template name */
@@ -526,8 +526,8 @@ trait ImplicitMemberShadowing {
       assert(ambiguatingMembers.foreach(_.byConversion.isDefined) */
   def ambiguatingMembers: List[MemberEntity]
 
-  def isShadowed: Boolean = !shadowingMembers.isEmpty
-  def isAmbiguous: Boolean = !ambiguatingMembers.isEmpty
+  def isShadowed: Boolean = shadowingMembers.nonEmpty
+  def isAmbiguous: Boolean = ambiguatingMembers.nonEmpty
 }
 
 /** A trait that encapsulates a constraint necessary for implicit conversion */

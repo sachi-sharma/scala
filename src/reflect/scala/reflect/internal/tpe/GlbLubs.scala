@@ -184,8 +184,7 @@ private[internal] trait GlbLubs {
   /** Eliminate from list of types all elements which are a supertype
     *  of some other element of the list. */
   private def elimSuper(ts: List[Type]): List[Type] = ts match {
-    case List() => List()
-    case List(t) => List(t)
+    case List() | List(_) => ts
     case t :: ts1 =>
       val rest = elimSuper(ts1 filter (t1 => !(t <:< t1)))
       if (rest exists (t1 => t1 <:< t)) rest else t :: rest
@@ -195,8 +194,8 @@ private[internal] trait GlbLubs {
     *  of some other element of the list. */
   private def elimSub(ts: List[Type], depth: Depth): List[Type] = {
     def elimSub0(ts: List[Type]): List[Type] = ts match {
-      case List() => List()
-      case List(t) => List(t)
+      case List() => ts
+      case List(t) => ts
       case t :: ts1 =>
         val rest = elimSub0(ts1 filter (t1 => !isSubType(t1, t, depth.decr)))
         if (rest exists (t1 => isSubType(t, t1, depth.decr))) rest else t :: rest
@@ -329,7 +328,7 @@ private[internal] trait GlbLubs {
           def lubsym(proto: Symbol): Symbol = {
             val prototp = lubThisType.memberInfo(proto)
             val syms = narrowts map (t =>
-              // SI-7602 With erroneous code, we could end up with overloaded symbols after filtering
+              // scala/bug#7602 With erroneous code, we could end up with overloaded symbols after filtering
               //         so `suchThat` unsuitable.
               t.nonPrivateMember(proto.name).filter(sym =>
                 sym.tpe matches prototp.substThis(lubThisType.typeSymbol, t)))
@@ -387,7 +386,7 @@ private[internal] trait GlbLubs {
             else lubBase
           }
         }
-      // dropIllegalStarTypes is a localized fix for SI-6897. We should probably
+      // dropIllegalStarTypes is a localized fix for scala/bug#6897. We should probably
       // integrate that transformation at a lower level in master, but lubs are
       // the likely and maybe only spot they escape, so fixing here for 2.10.1.
       existentialAbstraction(tparams, dropIllegalStarTypes(lubType))

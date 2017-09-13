@@ -27,9 +27,11 @@ import transform.patmat.PatternMatching
 import transform._
 import backend.{JavaPlatform, ScalaPrimitives}
 import backend.jvm.GenBCode
+import scala.concurrent.Future
 import scala.language.postfixOps
 import scala.tools.nsc.ast.{TreeGen => AstTreeGen}
 import scala.tools.nsc.classpath._
+import scala.tools.nsc.profile.Profiler
 
 class Global(var currentSettings: Settings, var reporter: Reporter)
     extends SymbolTable
@@ -109,7 +111,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   type ThisPlatform = JavaPlatform { val global: Global.this.type }
   lazy val platform: ThisPlatform  = new GlobalPlatform
   /* A hook for the REPL to add a classpath entry containing products of previous runs to inliner's bytecode repository*/
-  // Fixes SI-8779
+  // Fixes scala/bug#8779
   def optimizerClassPath(base: ClassPath): ClassPath = base
 
   def classPath: ClassPath = platform.classPath
@@ -126,7 +128,8 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
   /** A spare instance of TreeBuilder left for backwards compatibility. */
   lazy val treeBuilder: TreeBuilder { val global: Global.this.type } = new TreeBuilder {
-    val global: Global.this.type = Global.this;
+    val global: Global.this.type = Global.this
+
     def unit = currentUnit
     def source = currentUnit.source
   }
@@ -141,6 +144,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     class IClass(val symbol: Symbol)
   }
 
+  // TODO: move to the backend, make it a component
   /** Scala primitives, used the backend */
   object scalaPrimitives extends {
     val global: Global.this.type = Global.this
@@ -580,7 +584,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     val runsRightAfter = None
   } with Delambdafy
 
-  // phaseName = "bcode"
+  // phaseName = "jvm"
   object genBCode extends {
     val global: Global.this.type = Global.this
     val runsAfter = List("cleanup")
@@ -1084,6 +1088,8 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     /** The currently compiled unit; set from GlobalPhase */
     var currentUnit: CompilationUnit = NoCompilationUnit
 
+    val profiler: Profiler = Profiler(settings)
+
     // used in sbt
     def uncheckedWarnings: List[(Position, String)]   = reporting.uncheckedWarnings.map{case (pos, (msg, since)) => (pos, msg)}
     // used in sbt
@@ -1295,7 +1301,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       unitbuf += unit
       compiledFiles += unit.source.file.path
     }
-    private def warnDeprecatedAndConflictingSettings(unit: CompilationUnit) {
+    private def warnDeprecatedAndConflictingSettings() {
       // issue warnings for any usage of deprecated settings
       settings.userSetSettings filter (_.isDeprecated) foreach { s =>
         currentRun.reporting.deprecationWarning(NoPosition, s.name + " is deprecated: " + s.deprecationMessage.get, "")
@@ -1393,10 +1399,10 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
      *  unless there is a problem already,
      *  such as a plugin was passed a bad option.
      */
-    def compileSources(sources: List[SourceFile]) = if (!reporter.hasErrors) {
+    def compileSources(sources: List[SourceFile]): Unit = if (!reporter.hasErrors) {
 
       def checkDeprecations() = {
-        warnDeprecatedAndConflictingSettings(newCompilationUnit(""))
+        warnDeprecatedAndConflictingSettings()
         reporting.summarizeErrors()
       }
 
@@ -1408,9 +1414,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       }
     }
 
-    def compileUnits(units: List[CompilationUnit], fromPhase: Phase): Unit =
-      compileUnitsInternal(units, fromPhase)
-
+    def compileUnits(units: List[CompilationUnit], fromPhase: Phase): Unit =  compileUnitsInternal(units,fromPhase)
     private def compileUnitsInternal(units: List[CompilationUnit], fromPhase: Phase) {
       def currentTime = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
 
@@ -1418,13 +1422,15 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       val startTime = currentTime
 
       reporter.reset()
-      warnDeprecatedAndConflictingSettings(unitbuf.head)
+      warnDeprecatedAndConflictingSettings()
       globalPhase = fromPhase
 
       while (globalPhase.hasNext && !reporter.hasErrors) {
         val startTime = currentTime
         phase = globalPhase
+        val profileBefore=profiler.beforePhase(phase)
         globalPhase.run()
+        profiler.afterPhase(phase, profileBefore)
 
         // progress update
         informTime(globalPhase.description, startTime)
@@ -1459,6 +1465,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
         advancePhase()
       }
+      profiler.finished()
 
       reporting.summarizeErrors()
 
@@ -1487,17 +1494,25 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
     /** Compile list of abstract files. */
     def compileFiles(files: List[AbstractFile]) {
-      try compileSources(files map getSourceFile)
+      try {
+        val snap = profiler.beforePhase(Global.InitPhase)
+        val sources = files map getSourceFile
+        profiler.afterPhase(Global.InitPhase, snap)
+        compileSources(sources)
+      }
       catch { case ex: IOException => globalError(ex.getMessage()) }
     }
 
     /** Compile list of files given by their names */
     def compile(filenames: List[String]) {
       try {
+        val snap = profiler.beforePhase(Global.InitPhase)
+
         val sources: List[SourceFile] =
           if (settings.script.isSetByUser && filenames.size > 1) returning(Nil)(_ => globalError("can only compile one script at a time"))
           else filenames map getSourceFile
 
+        profiler.afterPhase(Global.InitPhase, snap)
         compileSources(sources)
       }
       catch { case ex: IOException => globalError(ex.getMessage()) }
@@ -1549,7 +1564,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
   /** We resolve the class/object ambiguity by passing a type/term name.
    */
-  def showDef(fullName: Name, declsOnly: Boolean, ph: Phase) = {
+  def showDef(fullName: Name, declsOnly: Boolean, ph: Phase): Unit = {
     val boringOwners = Set[Symbol](definitions.AnyClass, definitions.AnyRefClass, definitions.ObjectClass)
     def phased[T](body: => T): T = exitingPhase(ph)(body)
     def boringMember(sym: Symbol) = boringOwners(sym.owner)
@@ -1605,5 +1620,10 @@ object Global {
     //val loader = ScalaClassLoader(getClass.getClassLoader)  // apply does not make delegate
     val loader = new ClassLoader(getClass.getClassLoader) with ScalaClassLoader
     loader.create[Reporter](settings.reporter.value, settings.errorFn)(settings)
+  }
+  private object InitPhase extends Phase(null) {
+    def name = "<init phase>"
+    override def keepsTypeParams = false
+    def run() { throw new Error("InitPhase.run") }
   }
 }

@@ -22,6 +22,7 @@ import ScalaClassLoader.URLClassLoader
 import scala.tools.nsc.util.Exceptional.unwrap
 import java.net.URL
 import scala.tools.util.PathResolver
+import scala.util.{Try => Trying}
 
 /** An interpreter for Scala code.
  *
@@ -111,11 +112,8 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
     try body finally label = saved
   }
 
-  // the expanded prompt but without color escapes and without leading newline, for purposes of indenting
-  lazy val formatting = Formatting.forPrompt(replProps.promptText)
   lazy val reporter: ReplReporter = new ReplReporter(this)
 
-  import formatting.indentCode
   import reporter.{ printMessage, printUntruncatedMessage }
 
   // This exists mostly because using the reporter too early leads to deadlock.
@@ -133,7 +131,7 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
     catch AbstractOrMissingHandler()
   }
   private val logScope = scala.sys.props contains "scala.repl.scope"
-  private def scopelog(msg: String) = if (logScope) Console.err.println(msg)
+  private def scopelog(msg: => String) = if (logScope) Console.err.println(msg)
 
   // argument is a thunk to execute after init is done
   def initialize(postInitSignal: => Unit) {
@@ -314,7 +312,7 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
   def originalPath(name: Name): String   = translateOriginalPath(typerOp path name)
   def originalPath(sym: Symbol): String  = translateOriginalPath(typerOp path sym)
   /** For class based repl mode we use an .INSTANCE accessor. */
-  val readInstanceName = if(isClassBased) ".INSTANCE" else ""
+  val readInstanceName = if (isClassBased) ".INSTANCE" else ""
   def translateOriginalPath(p: String): String = {
     val readName = java.util.regex.Matcher.quoteReplacement(sessionNames.read)
     p.replaceFirst(readName, readName + readInstanceName)
@@ -376,24 +374,25 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
     None
   }
 
-  private def updateReplScope(sym: Symbol, isDefined: Boolean) {
-    def log(what: String) {
+  private def updateReplScope(sym: Symbol, isDefined: Boolean): Unit = {
+    def log(what: String) = scopelog {
       val mark = if (sym.isType) "t " else "v "
       val name = exitingTyper(sym.nameString)
       val info = cleanTypeAfterTyper(sym)
       val defn = sym defStringSeenAs info
 
-      scopelog(f"[$mark$what%6s] $name%-25s $defn%s")
+      f"[$mark$what%6s] $name%-25s $defn%s"
     }
-    if (ObjectClass isSubClass sym.owner) return
-    // unlink previous
-    replScope lookupAll sym.name foreach { sym =>
-      log("unlink")
-      replScope unlink sym
+    if (!ObjectClass.isSubClass(sym.owner)) {
+      // unlink previous
+      replScope.lookupAll(sym.name) foreach { sym =>
+        log("unlink")
+        replScope unlink sym
+      }
+      val what = if (isDefined) "define" else "import"
+      log(what)
+      replScope enter sym
     }
-    val what = if (isDefined) "define" else "import"
-    log(what)
-    replScope enter sym
   }
 
   def recordRequest(req: Request) {
@@ -856,8 +855,8 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
       def envLines = {
         if (!isReplPower) Nil // power mode only for now
         else {
-          val escapedLine = Constant(originalLine).escapedStringValue
-          List(s"""def $$line = $escapedLine """, """def $trees = _root_.scala.Nil""")
+          val escapedLine = Constant(originalLine).escapedStringValue.replaceAllLiterally("$", "\"+\"$\"+\"")
+          List(s"""def $$line = $escapedLine""", s"""def $$trees = _root_.scala.Nil""")
         }
       }
       def preamble = s"""
@@ -865,8 +864,8 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
         |${preambleHeader format lineRep.readName}
         |${envLines mkString ("  ", ";\n  ", ";\n")}
         |$importsPreamble
-        |${indentCode(toCompute)}""".stripMargin
-      def preambleLength = preamble.length - toCompute.length - 1
+        |${toCompute}""".stripMargin
+      def preambleLength = preamble.length - toCompute.length
 
       val generate = (m: MemberHandler) => m extraCodeToEvaluate Request.this
 
@@ -966,7 +965,12 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
       }
     }
 
-    lazy val resultSymbol = lineRep.resolvePathToSymbol(fullAccessPath)
+    // the type symbol of the owner of the member that supplies the result value
+    lazy val resultSymbol = {
+      val sym = lineRep.resolvePathToSymbol(fullAccessPath)
+      // plow through the INSTANCE member when -Yrepl-class-based
+      if (sym.isTerm && sym.nameString == "INSTANCE") sym.typeSignature.typeSymbol else sym
+    }
 
     def applyToResultMember[T](name: Name, f: Symbol => T) = exitingTyper(f(resultSymbol.info.nonPrivateDecl(name)))
 
@@ -1031,18 +1035,44 @@ class IMain(initialSettings: Settings, protected val out: JPrintWriter) extends 
 
   def typeOfTerm(id: String): Type = symbolOfTerm(id).tpe
 
-  def valueOfTerm(id: String): Option[Any] = exitingTyper {
-    def value() = {
-      val sym0    = symbolOfTerm(id)
-      val sym     = (importToRuntime importSymbol sym0).asTerm
-      val module  = runtimeMirror.reflectModule(sym.owner.companionSymbol.asModule).instance
-      val module1 = runtimeMirror.reflect(module)
-      val invoker = module1.reflectField(sym)
+  // Given the fullName of the symbol, reflectively drill down the path
+  def valueOfTerm(id: String): Option[Any] = {
+    def value(fullName: String) = {
+      import runtimeMirror.universe.{Symbol, InstanceMirror, TermName}
+      val pkg :: rest = (fullName split '.').toList
+      val top = runtimeMirror.staticPackage(pkg)
+      @annotation.tailrec
+      def loop(inst: InstanceMirror, cur: Symbol, path: List[String]): Option[Any] = {
+        def mirrored =
+          if (inst != null) inst
+          else runtimeMirror.reflect((runtimeMirror reflectModule cur.asModule).instance)
 
-      invoker.get
+        path match {
+          case last :: Nil  =>
+            cur.typeSignature.decls.find(x => x.name.toString == last && x.isAccessor).map { m =>
+              mirrored.reflectMethod(m.asMethod).apply()
+            }
+          case next :: rest =>
+            val s = cur.typeSignature.member(TermName(next))
+            val i =
+              if (s.isModule) {
+                if (inst == null) null
+                else runtimeMirror.reflect((inst reflectModule s.asModule).instance)
+              }
+              else if (s.isAccessor) {
+                runtimeMirror.reflect(mirrored.reflectMethod(s.asMethod).apply())
+              }
+              else {
+                assert(false, originalPath(s))
+                inst
+              }
+            loop(i, s, rest)
+          case Nil => None
+        }
+      }
+      loop(null, top, rest)
     }
-
-    try Some(value()) catch { case _: Exception => None }
+    Option(symbolOfTerm(id)).filter(_.exists).flatMap(s => Trying(value(originalPath(s))).toOption.flatten)
   }
 
   /** It's a bit of a shotgun approach, but for now we will gain in
@@ -1255,7 +1285,7 @@ object IMain {
     def isStripping        = isettings.unwrapStrings
     def isTruncating       = reporter.truncationOK
 
-    def stripImpl(str: String): String = naming.unmangle(str)
+    def stripImpl(str: String): String = if (isInitializeComplete) naming.unmangle(str) else str
   }
   private[interpreter] def defaultSettings = new Settings()
   private[scala] def defaultOut = new NewLinePrintWriter(new ConsoleWriter, true)

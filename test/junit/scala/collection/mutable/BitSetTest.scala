@@ -6,7 +6,7 @@ import org.junit.runners.JUnit4
 
 @RunWith(classOf[JUnit4])
 class BitSetTest {
-  // Test for SI-8910
+  // Test for scala/bug#8910
   @Test def capacityExpansionTest(): Unit = {
     val bitSet = BitSet.empty
     val size   = bitSet.toBitMask.length
@@ -40,5 +40,12 @@ class BitSetTest {
     val bs = BitSet()
     val last = (bs ++ (0 to 128)).last  // Just needs not to throw
     assert(last == 128)
+  }
+
+  @Test def t10399(): Unit = {
+    val bsFromEmptyBitMask = BitSet.fromBitMask(Array.empty[Long])
+    assert(bsFromEmptyBitMask.add(0))
+    val bsFromEmptyBitMaskNoCopy = BitSet.fromBitMaskNoCopy(Array.empty[Long])
+    assert(bsFromEmptyBitMaskNoCopy.add(0))
   }
 }

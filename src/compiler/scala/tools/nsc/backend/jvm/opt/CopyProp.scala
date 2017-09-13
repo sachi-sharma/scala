@@ -8,18 +8,20 @@ package backend.jvm
 package opt
 
 import scala.annotation.{switch, tailrec}
-import scala.tools.asm.tree.analysis.BasicInterpreter
-import scala.tools.asm.Type
-import scala.tools.asm.Opcodes._
-import scala.tools.asm.tree._
-import scala.collection.mutable
 import scala.collection.JavaConverters._
+import scala.collection.mutable
+import scala.tools.asm.Opcodes._
+import scala.tools.asm.Type
+import scala.tools.asm.tree._
+import scala.tools.asm.tree.analysis.BasicInterpreter
 import scala.tools.nsc.backend.jvm.BTypes.InternalName
 import scala.tools.nsc.backend.jvm.analysis._
 import scala.tools.nsc.backend.jvm.opt.BytecodeUtils._
 
-class CopyProp[BT <: BTypes](val btypes: BT) {
-  import btypes._
+abstract class CopyProp {
+  val postProcessor: PostProcessor
+
+  import postProcessor.{backendUtils, callGraph}
   import backendUtils._
 
 
@@ -85,7 +87,7 @@ class CopyProp[BT <: BTypes](val btypes: BT) {
    * eliminated, it is replaced by a POP. The [[eliminatePushPop]] cleans up unnecessary POPs.
    *
    * Note that an `ASOTRE` can not always be eliminated: it removes a reference to the object that
-   * is currently stored in that local, which potentially frees it for GC (SI-5313). Therefore
+   * is currently stored in that local, which potentially frees it for GC (scala/bug#5313). Therefore
    * we replace such stores by `POP; ACONST_NULL; ASTORE x`.
    */
   def eliminateStaleStores(method: MethodNode, owner: InternalName): Boolean = {
@@ -474,7 +476,7 @@ class CopyProp[BT <: BTypes](val btypes: BT) {
    *
    * (1) This could be made more precise by running a prodCons analysis and checking that the load
    * is the only user of the store. Then we could eliminate the pair even if the variable is live
-   * (except for ASTORE, SI-5313). Not needing an analyzer is more efficient, and catches most
+   * (except for ASTORE, scala/bug#5313). Not needing an analyzer is more efficient, and catches most
    * cases.
    *
    * (2) The implementation uses a conservative estimation for liveness (if some instruction uses

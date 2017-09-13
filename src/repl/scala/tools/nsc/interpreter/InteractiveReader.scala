@@ -46,6 +46,10 @@ object InteractiveReader {
     }
 
   def apply(): InteractiveReader = SimpleReader()
+
+  // a non-interactive InteractiveReader that returns the given text
+  def apply(text: String): InteractiveReader = SimpleReader(text)
+
   @deprecated("Use `apply` instead.", "2.9.0")
   def createDefault(): InteractiveReader = apply() // used by sbt
 }
@@ -107,6 +111,7 @@ class SplashLoop(reader: InteractiveReader, prompt: String) extends Runnable {
   def start(): Unit = result.synchronized {
     require(thread == null, "Already started")
     thread = new Thread(this)
+    thread.setDaemon(true)
     running = true
     thread.start()
   }
@@ -118,7 +123,7 @@ class SplashLoop(reader: InteractiveReader, prompt: String) extends Runnable {
   }
 
   /** Block for the result line, or null on ctrl-D. */
-  def line: String = result.take getOrElse null
+  def line: String = result.take.orNull
 }
 object SplashLoop {
   def apply(reader: SplashReader, prompt: String): SplashLoop = new SplashLoop(reader, prompt)

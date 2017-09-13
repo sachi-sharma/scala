@@ -390,7 +390,7 @@ trait TypeDiagnostics {
   /** This is tricky stuff - we need to traverse types deeply to
    *  explain name ambiguities, which may occur anywhere.  However
    *  when lub explosions come through it knocks us into an n^2
-   *  disaster, see SI-5580.  This is trying to perform the initial
+   *  disaster, see scala/bug#5580.  This is trying to perform the initial
    *  filtering of possibly ambiguous types in a sufficiently
    *  aggressive way that the state space won't explode.
    */
@@ -606,7 +606,7 @@ trait TypeDiagnostics {
         warnUnusedPatVars || warnUnusedPrivates || warnUnusedLocals || warnUnusedParams || warnUnusedImplicits
       }
 
-      def apply(unit: CompilationUnit): Unit = if (warningsEnabled) {
+      def apply(unit: CompilationUnit): Unit = if (warningsEnabled && !unit.isJava) {
         val p = new UnusedPrivates
         p.traverse(unit.body)
         if (settings.warnUnusedLocals || settings.warnUnusedPrivates) {
@@ -638,23 +638,23 @@ trait TypeDiagnostics {
               else if (sym.isModule) s"object ${sym.name.decoded}"
               else "term"
             )
-            reporter.warning(pos, s"$why $what in ${sym.owner} is never used")
+            context.warning(pos, s"$why $what in ${sym.owner} is never used")
           }
           for (v <- p.unsetVars) {
-            reporter.warning(v.pos, s"local var ${v.name} in ${v.owner} is never set: consider using immutable val")
+            context.warning(v.pos, s"local var ${v.name} in ${v.owner} is never set: consider using immutable val")
           }
           for (t <- p.unusedTypes) {
             val sym = t.symbol
             val wrn = if (sym.isPrivate) settings.warnUnusedPrivates else settings.warnUnusedLocals
             if (wrn) {
               val why = if (sym.isPrivate) "private" else "local"
-              reporter.warning(t.pos, s"$why ${sym.fullLocationString} is never used")
+              context.warning(t.pos, s"$why ${sym.fullLocationString} is never used")
             }
           }
         }
         if (settings.warnUnusedPatVars) {
           for (v <- p.unusedPatVars)
-            reporter.warning(v.pos, s"pattern var ${v.name} in ${v.owner} is never used; `${v.name}@_' suppresses this warning")
+            context.warning(v.pos, s"pattern var ${v.name} in ${v.owner} is never used; `${v.name}@_' suppresses this warning")
         }
         if (settings.warnUnusedParams || settings.warnUnusedImplicits) {
           def classOf(s: Symbol): Symbol = if (s.isClass || s == NoSymbol) s else classOf(s.owner)
@@ -672,7 +672,7 @@ trait TypeDiagnostics {
             && !isConvention(s)
           )
           for (s <- p.unusedParams if warnable(s))
-            reporter.warning(s.pos, s"parameter $s in ${s.owner} is never used")
+            context.warning(s.pos, s"parameter $s in ${s.owner} is never used")
         }
       }
     }
@@ -698,11 +698,8 @@ trait TypeDiagnostics {
         } else f
       }
       def apply(tree: Tree): Tree = {
-        // Error suppression (in context.warning) would squash some of these warnings.
-        // It is presumed if you are using a -Y option you would really like to hear
-        // the warnings you've requested; thus, use reporter.warning.
         if (settings.warnDeadCode && context.unit.exists && treeOK(tree) && exprOK)
-          reporter.warning(tree.pos, "dead code following this construct")
+          context.warning(tree.pos, "dead code following this construct")
         tree
       }
 
@@ -717,9 +714,9 @@ trait TypeDiagnostics {
      *  to a cyclic reference, and None otherwise.
      */
     def cyclicReferenceMessage(sym: Symbol, tree: Tree) = condOpt(tree) {
-      case ValDef(_, _, tpt, _) if tpt.tpe == null        => "recursive "+sym+" needs type"
-      case DefDef(_, _, _, _, tpt, _) if tpt.tpe == null  => List(cyclicAdjective(sym), sym, "needs result type") mkString " "
-      case Import(expr, selectors)                        =>
+      case ValDef(_, _, TypeTree(), _)       => "recursive "+sym+" needs type"
+      case DefDef(_, _, _, _, TypeTree(), _) => List(cyclicAdjective(sym), sym, "needs result type") mkString " "
+      case Import(expr, selectors)           =>
         ( "encountered unrecoverable cycle resolving import." +
           "\nNote: this is often due in part to a class depending on a definition nested within its companion." +
           "\nIf applicable, you may wish to try moving some members into another object."

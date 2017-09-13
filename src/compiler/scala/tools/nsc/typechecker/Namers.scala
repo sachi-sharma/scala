@@ -23,9 +23,6 @@ trait Namers extends MethodSynthesis {
   import global._
   import definitions._
 
-  var _lockedCount = 0
-  def lockedCount = this._lockedCount
-
   /** Replaces any Idents for which cond is true with fresh TypeTrees().
    *  Does the same for any trees containing EmptyTrees.
    */
@@ -60,11 +57,6 @@ trait Namers extends MethodSynthesis {
 
     private lazy val innerNamer =
       if (isTemplateContext(context)) createInnerNamer() else this
-
-    // Cached as a val because `settings.isScala212` parses the Scala version each time...
-    // Not in Namers because then we need to go to outer first to check this.
-    // I do think it's ok to check every time we create a Namer instance (so, not a lazy val).
-    private[this] val isScala212 = settings.isScala212
 
     def createNamer(tree: Tree): Namer = {
       val sym = tree match {
@@ -289,7 +281,11 @@ trait Namers extends MethodSynthesis {
       }
       tree.symbol match {
         case NoSymbol => try dispatch() catch typeErrorHandler(tree, this.context)
-        case sym      => enterExistingSym(sym, tree)
+        case sym      =>
+          tree match {
+            case tree@Import(_, _) => enterExistingSym(sym, tree).make(tree)
+            case _ => enterExistingSym(sym, tree)
+          }
       }
     }
 
@@ -446,7 +442,7 @@ trait Namers extends MethodSynthesis {
         // the same package object in sources, we have to clean the slate and remove package object
         // members from the package class.
         //
-        // TODO SI-4695 Pursue the approach in https://github.com/scala/scala/pull/2789 that avoids
+        // TODO scala/bug#4695 Pursue the approach in https://github.com/scala/scala/pull/2789 that avoids
         //      opening up the package object on the classpath at all if one exists in source.
         if (existingModule.isPackageObject) {
           val packageScope = existingModule.enclosingPackageClass.rawInfo.decls
@@ -565,7 +561,7 @@ trait Namers extends MethodSynthesis {
           //
           // Note: java imports have precedence over definitions in the same package
           //       so don't warn for them. There is a corresponding special treatment
-          //       in the shadowing rules in typedIdent to (SI-7232). In any case,
+          //       in the shadowing rules in typedIdent to (scala/bug#7232). In any case,
           //       we shouldn't be emitting warnings for .java source files.
           if (!context.unit.isJava)
             checkNotRedundant(tree.pos withPoint fromPos, from, to)
@@ -686,7 +682,14 @@ trait Namers extends MethodSynthesis {
             // which could upset other code paths)
             if (!scopePartiallyCompleted)
               companionContext.scope.unlink(sym)
+
+            for (a <- sym.attachments.get[CaseApplyDefaultGetters]; defaultGetter <- a.defaultGetters) {
+              companionContext.unit.synthetics -= defaultGetter
+              companionContext.scope.unlink(defaultGetter)
+            }
           }
+
+          sym.removeAttachment[CaseApplyDefaultGetters] // no longer needed once the completer is done
         }
       }
 
@@ -920,11 +923,16 @@ trait Namers extends MethodSynthesis {
             // while `valDef` is the field definition that spawned the accessor
             // NOTE: `valTypeCompleter` handles abstract vals, trait vals and lazy vals, where the ValDef carries the getter's symbol
 
-            // reuse work done in valTypeCompleter if we already computed the type signature of the val
-            // (assuming the field and accessor symbols are distinct -- i.e., we're not in a trait)
+            valDef.symbol.rawInfo match {
+              case c: ValTypeCompleter =>
+                // If the field and accessor symbols are distinct, i.e., we're not in a trait, invoke the
+                // valTypeCompleter. This ensures that field annotations are set correctly (scala/bug#10471).
+                c.completeImpl(valDef.symbol)
+              case _ =>
+            }
             val valSig =
-              if ((accessorSym ne valDef.symbol) && valDef.symbol.isInitialized) valDef.symbol.info
-              else typeSig(valDef, Nil) // don't set annotations for the valdef -- we just want to compute the type sig (TODO: dig deeper and see if we can use memberSig)
+              if (valDef.symbol.isInitialized) valDef.symbol.info // re-use an already computed type
+              else typeSig(valDef, Nil) // Don't pass any annotations to set on the valDef.symbol, just compute the type sig (TODO: dig deeper and see if we can use memberSig)
 
             // patch up the accessor's tree if the valdef's tpt was not known back when the tree was synthesized
             // can't look at `valDef.tpt` here because it may have been completed by now (this is why we pass in `missingTpt`)
@@ -1155,7 +1163,7 @@ trait Namers extends MethodSynthesis {
           val cdef = cma.caseClass
           def hasCopy = (decls containsName nme.copy) || parents.exists(_ member nme.copy exists)
 
-          // SI-5956 needs (cdef.symbol == clazz): there can be multiple class symbols with the same name
+          // scala/bug#5956 needs (cdef.symbol == clazz): there can be multiple class symbols with the same name
           if (cdef.symbol == clazz && !hasCopy)
             addCopyMethod(cdef, templateNamer)
         }
@@ -1187,7 +1195,7 @@ trait Namers extends MethodSynthesis {
       if (clazz.isDerivedValueClass) {
         log("Ensuring companion for derived value class " + cdef.name + " at " + cdef.pos.show)
         clazz setFlag FINAL
-        // Don't force the owner's info lest we create cycles as in SI-6357.
+        // Don't force the owner's info lest we create cycles as in scala/bug#6357.
         enclosingNamerWithScope(clazz.owner.rawInfo.decls).ensureCompanionObject(cdef)
       }
       pluginsTp
@@ -1359,11 +1367,12 @@ trait Namers extends MethodSynthesis {
             else applyFully(tp.resultType(paramss.head.map(_.tpe)), paramss.tail)
 
           if (inferResTp) {
-            // SI-7668 Substitute parameters from the parent method with those of the overriding method.
+            // scala/bug#7668 Substitute parameters from the parent method with those of the overriding method.
             val overriddenResTp = applyFully(overriddenTp, vparamSymss).substSym(overriddenTparams, tparamSkolems)
 
             // provisionally assign `meth` a method type with inherited result type
             // that way, we can leave out the result type even if method is recursive.
+            // this also prevents cycles in implicit search, see comment in scala/bug#10471
             meth setInfo deskolemizedPolySig(vparamSymss, overriddenResTp)
             overriddenResTp
           } else resTpGiven
@@ -1381,11 +1390,6 @@ trait Namers extends MethodSynthesis {
       // If we, or the overridden method has defaults, add getters for them
       if (mexists(vparamss)(_.symbol.hasDefault) || mexists(overridden.paramss)(_.hasDefault))
         addDefaultGetters(meth, ddef, vparamss, tparams,  overridden)
-
-      // fast track macros, i.e. macros defined inside the compiler, are hardcoded
-      // hence we make use of that and let them have whatever right-hand side they need
-      // (either "macro ???" as they used to or just "???" to maximally simplify their compilation)
-      if (fastTrack contains meth) meth setFlag MACRO
 
       // macro defs need to be typechecked in advance
       // because @macroImpl annotation only gets assigned during typechecking
@@ -1507,7 +1511,7 @@ trait Namers extends MethodSynthesis {
                   // by martin: the null case can happen in IDE; this is really an ugly hack on top of an ugly hack but it seems to work
                   case Some(cda) =>
                     if (cda.companionModuleClassNamer == null) {
-                      devWarning(s"SI-6576 The companion module namer for $meth was unexpectedly null")
+                      devWarning(s"scala/bug#6576 The companion module namer for $meth was unexpectedly null")
                       return
                     }
                     val p = (cda.classWithDefault, cda.companionModuleClassNamer)
@@ -1557,6 +1561,14 @@ trait Namers extends MethodSynthesis {
             if (!isConstr)
               methOwner.resetFlag(INTERFACE) // there's a concrete member now
             val default = parentNamer.enterSyntheticSym(defaultTree)
+            if (meth.name == nme.apply && meth.hasAllFlags(CASE | SYNTHETIC)) {
+              val att = meth.attachments.get[CaseApplyDefaultGetters].getOrElse({
+                val a = new CaseApplyDefaultGetters()
+                meth.updateAttachment(a)
+                a
+              })
+              att.defaultGetters += default
+            }
             if (default.owner.isTerm)
               saveDefaultGetter(meth, default)
           }
@@ -1589,7 +1601,7 @@ trait Namers extends MethodSynthesis {
               val valOwner = owner.owner
               // there's no overriding outside of classes, and we didn't use to do this in 2.11, so provide opt-out
 
-              if (!isScala212 || !valOwner.isClass) WildcardType
+              if (!settings.isScala212 || !valOwner.isClass) WildcardType
               else {
                 // normalize to getter so that we correctly consider a val overriding a def
                 // (a val's name ends in a " ", so can't compare to def)
@@ -1694,7 +1706,7 @@ trait Namers extends MethodSynthesis {
       else {
         expr1 match {
           case This(_) =>
-            // SI-8207 okay, typedIdent expands Ident(self) to C.this which doesn't satisfy the next case
+            // scala/bug#8207 okay, typedIdent expands Ident(self) to C.this which doesn't satisfy the next case
             // TODO should we change `typedIdent` not to expand to the `Ident` to a `This`?
           case _ if treeInfo.isStableIdentifierPattern(expr1) =>
           case _ =>
@@ -1761,7 +1773,7 @@ trait Namers extends MethodSynthesis {
     def annotSig(annotations: List[Tree]): List[AnnotationInfo] =
       annotations filterNot (_ eq null) map { ann =>
         val ctx = typer.context
-        // need to be lazy, #1782. enteringTyper to allow inferView in annotation args, SI-5892.
+        // need to be lazy, #1782. enteringTyper to allow inferView in annotation args, scala/bug#5892.
         AnnotationInfo lazily {
           enteringTyper {
             newTyper(ctx.makeNonSilent(ann)) typedAnnotation ann
@@ -1942,9 +1954,9 @@ trait Namers extends MethodSynthesis {
     def completeImpl(sym: Symbol): Unit
 
     override def complete(sym: Symbol) = {
-      _lockedCount += 1
+      lockedCount += 1
       try completeImpl(sym)
-      finally _lockedCount -= 1
+      finally lockedCount -= 1
     }
   }
 
@@ -2038,7 +2050,7 @@ trait Namers extends MethodSynthesis {
    */
   def companionSymbolOf(original: Symbol, ctx: Context): Symbol = if (original == NoSymbol) NoSymbol else {
     val owner = original.owner
-    // SI-7264 Force the info of owners from previous compilation runs.
+    // scala/bug#7264 Force the info of owners from previous compilation runs.
     //         Doing this generally would trigger cycles; that's what we also
     //         use the lower-level scan through the current Context as a fall back.
     if (!currentRun.compiles(owner)) owner.initialize

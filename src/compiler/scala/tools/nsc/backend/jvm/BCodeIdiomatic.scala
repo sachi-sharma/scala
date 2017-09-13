@@ -3,16 +3,15 @@
  * @author  Martin Odersky
  */
 
-package scala
-package tools.nsc
+package scala.tools.nsc
 package backend.jvm
 
-import scala.tools.asm
 import scala.annotation.switch
 import scala.collection.mutable
-import GenBCode._
+import scala.tools.asm
 import scala.tools.asm.tree.MethodInsnNode
 import scala.tools.nsc.backend.jvm.BCodeHelpers.TestOp
+import scala.tools.nsc.backend.jvm.GenBCode._
 
 /*
  *  A high-level facade to the ASM API for bytecode generation.
@@ -21,24 +20,14 @@ import scala.tools.nsc.backend.jvm.BCodeHelpers.TestOp
  *  @version 1.0
  *
  */
-abstract class BCodeIdiomatic extends SubComponent {
-  val bTypes = new BTypesFromSymbols[global.type](global)
+abstract class BCodeIdiomatic {
+  val global: Global
+  val bTypes: BTypesFromSymbols[global.type]
 
   import global._
   import bTypes._
   import coreBTypes._
-
-  val classfileVersion: Int = settings.target.value match {
-    case "jvm-1.8"     => asm.Opcodes.V1_8
-  }
-
-  val majorVersion: Int = (classfileVersion & 0xFF)
-  val emitStackMapFrame = (majorVersion >= 50)
-
-  val extraProc: Int = GenBCode.mkFlags(
-    asm.ClassWriter.COMPUTE_MAXS,
-    if (emitStackMapFrame) asm.ClassWriter.COMPUTE_FRAMES else 0
-  )
+  import genBCode.postProcessor.callGraph.callsitePositions
 
   lazy val JavaStringBuilderClassName = jlStringBuilderRef.internalName
 
@@ -106,7 +95,7 @@ abstract class BCodeIdiomatic extends SubComponent {
 
     def jmethod: asm.tree.MethodNode
 
-    import asm.Opcodes;
+    import asm.Opcodes
 
     final def emit(opc: Int) { jmethod.visitInsn(opc) }
 
@@ -127,7 +116,7 @@ abstract class BCodeIdiomatic extends SubComponent {
      */
     final def genPrimitiveLogical(op: /* LogicalOp */ Int, kind: BType) {
 
-      import scalaPrimitives.{ AND, OR, XOR }
+      import scalaPrimitives.{AND, OR, XOR}
 
       ((op, kind): @unchecked) match {
         case (AND, LONG) => emit(Opcodes.LAND)
@@ -156,7 +145,7 @@ abstract class BCodeIdiomatic extends SubComponent {
      */
     final def genPrimitiveShift(op: /* ShiftOp */ Int, kind: BType) {
 
-      import scalaPrimitives.{ LSL, ASR, LSR }
+      import scalaPrimitives.{ASR, LSL, LSR}
 
       ((op, kind): @unchecked) match {
         case (LSL, LONG) => emit(Opcodes.LSHL)
@@ -199,7 +188,7 @@ abstract class BCodeIdiomatic extends SubComponent {
      * can-multi-thread
      */
     def genConcat(elemType: BType, pos: Position): Unit = {
-      val paramType = elemType match {
+      val paramType: BType = elemType match {
         case ct: ClassBType if ct.isSubtypeOf(StringRef).get          => StringRef
         case ct: ClassBType if ct.isSubtypeOf(jlStringBufferRef).get  => jlStringBufferRef
         case ct: ClassBType if ct.isSubtypeOf(jlCharSequenceRef).get  => jlCharSequenceRef
@@ -264,7 +253,7 @@ abstract class BCodeIdiomatic extends SubComponent {
         case INT   => pickOne(JCodeMethodN.fromIntT2T)
 
         case FLOAT  =>
-          import asm.Opcodes.{ F2L, F2D, F2I }
+          import asm.Opcodes.{F2D, F2I, F2L}
           to match {
             case LONG    => emit(F2L)
             case DOUBLE  => emit(F2D)
@@ -272,7 +261,7 @@ abstract class BCodeIdiomatic extends SubComponent {
           }
 
         case LONG   =>
-          import asm.Opcodes.{ L2F, L2D, L2I }
+          import asm.Opcodes.{L2D, L2F, L2I}
           to match {
             case FLOAT   => emit(L2F)
             case DOUBLE  => emit(L2D)
@@ -280,7 +269,7 @@ abstract class BCodeIdiomatic extends SubComponent {
           }
 
         case DOUBLE =>
-          import asm.Opcodes.{ D2L, D2F, D2I }
+          import asm.Opcodes.{D2F, D2I, D2L}
           to match {
             case FLOAT   => emit(D2F)
             case LONG    => emit(D2L)
@@ -338,7 +327,7 @@ abstract class BCodeIdiomatic extends SubComponent {
     final def newarray(elem: BType) {
       elem match {
         case c: RefBType =>
-          /* phantom type at play in `Array(null)`, SI-1513. On the other hand, Array(()) has element type `scala.runtime.BoxedUnit` which isObject. */
+          /* phantom type at play in `Array(null)`, scala/bug#1513. On the other hand, Array(()) has element type `scala.runtime.BoxedUnit` which isObject. */
           jmethod.visitTypeInsn(Opcodes.ANEWARRAY, c.classOrArrayType)
         case _ =>
           assert(elem.isNonVoidPrimitiveType)
@@ -451,11 +440,11 @@ abstract class BCodeIdiomatic extends SubComponent {
         i += 1
       }
 
-      // check for duplicate keys to avoid "VerifyError: unsorted lookupswitch" (SI-6011)
+      // check for duplicate keys to avoid "VerifyError: unsorted lookupswitch" (scala/bug#6011)
       i = 1
       while (i < keys.length) {
         if (keys(i-1) == keys(i)) {
-          abort("duplicate keys in SWITCH, can't pick arbitrarily one of them to evict, see SI-6011.")
+          abort("duplicate keys in SWITCH, can't pick arbitrarily one of them to evict, see scala/bug#6011.")
         }
         i += 1
       }
@@ -479,7 +468,7 @@ abstract class BCodeIdiomatic extends SubComponent {
         var oldPos = 0
         var i = 0
         while (i < keyRange) {
-          val key = keyMin + i;
+          val key = keyMin + i
           if (keys(oldPos) == key) {
             newBranches(i) = branches(oldPos)
             oldPos += 1
@@ -640,10 +629,14 @@ abstract class BCodeIdiomatic extends SubComponent {
    * The entry-value for a LabelDef entry-key always contains the entry-key.
    *
    */
-  class LabelDefsFinder extends Traverser {
-    val result = mutable.Map.empty[Tree, List[LabelDef]]
+  class LabelDefsFinder(rhs: Tree) extends Traverser {
+    val result = mutable.AnyRefMap.empty[Tree, List[LabelDef]]
     var acc: List[LabelDef] = Nil
+    var directResult: List[LabelDef] = Nil
 
+    def apply(): Unit = {
+      traverse(rhs)
+    }
     /*
      * can-multi-thread
      */
@@ -660,6 +653,7 @@ abstract class BCodeIdiomatic extends SubComponent {
         acc = saved
       } else {
         result += (tree -> acc)
+        if (tree eq rhs) directResult = acc
         acc = acc ::: saved
       }
     }
