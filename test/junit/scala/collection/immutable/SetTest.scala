@@ -64,14 +64,16 @@ class SetTest {
       assertEquals(set, seta)
     }
 
+    // TODO: uncomment me once Enumeration changes are merged to STARR
+
     // Make sure ValueSets correctly rebuild themselves on widening with toSet
-    object WeekDay extends Enumeration {
-      type WeekDay = Value
-      val Mon, Tue, Wed, Thu, Fri, Sat, Sun = Value
-    }
-    val valuesa = any(WeekDay.values)
-    assert(WeekDay.values ne valuesa)
-    assertEquals(WeekDay.values, valuesa)
+    //object WeekDay extends Enumeration {
+    //  type WeekDay = Value
+    //  val Mon, Tue, Wed, Thu, Fri, Sat, Sun = Value
+    //}
+    //val valuesa = any(WeekDay.values)
+    //assert(WeekDay.values ne valuesa)
+    //assertEquals(WeekDay.values, valuesa)
 
     // Make sure regular Map keySets do not rebuild themselves on widening with toSet
     val mapset = Map(1 -> "cod", 2 -> "herring").keySet

@@ -22,7 +22,7 @@ abstract class NodePrinters {
   import global._
 
   object InfoLevel extends Enumeration {
-    val Quiet, Normal, Verbose = Value
+    val Quiet, Normal, Verbose = _Value
   }
   var infolevel = InfoLevel.Quiet
 

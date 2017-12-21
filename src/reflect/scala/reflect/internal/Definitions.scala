@@ -454,6 +454,10 @@ trait Definitions extends api.StandardDefinitions {
       lazy val Array_length                = getMemberMethod(ArrayClass, nme.length)
       lazy val Array_clone                 = getMemberMethod(ArrayClass, nme.clone_)
 
+    // Enumeration and friends
+    lazy val EnumerationClass       = requiredClass[scala.Enumeration]
+         def EnumerationClass_Value = getMemberMethod(EnumerationClass, nme.Value)
+
     // reflection / structural types
     lazy val SoftReferenceClass     = requiredClass[java.lang.ref.SoftReference[_]]
     lazy val MethodClass            = getClassByName(sn.MethodAsObject)

@@ -36,14 +36,14 @@ object BigDecimal {
     // Annoying boilerplate to ensure consistency with java.math.RoundingMode
     import java.math.{RoundingMode => RM}
     type RoundingMode = Value
-    val UP          = Value(RM.UP.ordinal)
-    val DOWN        = Value(RM.DOWN.ordinal)
-    val CEILING     = Value(RM.CEILING.ordinal)
-    val FLOOR       = Value(RM.FLOOR.ordinal)
-    val HALF_UP     = Value(RM.HALF_UP.ordinal)
-    val HALF_DOWN   = Value(RM.HALF_DOWN.ordinal)
-    val HALF_EVEN   = Value(RM.HALF_EVEN.ordinal)
-    val UNNECESSARY = Value(RM.UNNECESSARY.ordinal)
+    val UP          = _Value(RM.UP.ordinal)
+    val DOWN        = _Value(RM.DOWN.ordinal)
+    val CEILING     = _Value(RM.CEILING.ordinal)
+    val FLOOR       = _Value(RM.FLOOR.ordinal)
+    val HALF_UP     = _Value(RM.HALF_UP.ordinal)
+    val HALF_DOWN   = _Value(RM.HALF_DOWN.ordinal)
+    val HALF_EVEN   = _Value(RM.HALF_EVEN.ordinal)
+    val UNNECESSARY = _Value(RM.UNNECESSARY.ordinal)
   }
 
   /** Constructs a `BigDecimal` using the decimal text representation of `Double` value `d`, rounding if necessary. */

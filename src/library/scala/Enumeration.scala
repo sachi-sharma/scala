@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2002-2013, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2002-2017, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -12,6 +12,8 @@ import scala.collection.{ mutable, immutable, generic, SortedSetLike, AbstractSe
 import java.lang.reflect.{ Method => JMethod, Field => JField }
 import scala.reflect.NameTransformer._
 import scala.util.matching.Regex
+
+import language.experimental.macros
 
 /** Defines a finite set of values specific to the enumeration. Typically
  *  these values enumerate all possible forms something can take and provide
@@ -148,7 +150,12 @@ abstract class Enumeration (initial: Int) extends Serializable {
     throw new NoSuchElementException(s"No value found for '$s'"))
 
   /** Creates a fresh value, part of this enumeration. */
-  protected final def Value: Value = Value(nextId)
+  // The implementation is hardwired to `scala.tools.reflect.EnumerationImpl.enumerationValue`
+  // using the mechanism implemented in `scala.tools.reflect.FastTrack`
+  protected final def Value: Value = macro ???
+
+  // shim until reSTARR
+  protected[scala] final def _Value: Value = Value(nextId, nextNameOrNull)
 
   /** Creates a fresh value, part of this enumeration, identified by the
    *  integer `i`.
@@ -157,7 +164,12 @@ abstract class Enumeration (initial: Int) extends Serializable {
    *           unique amongst all values of the enumeration.
    *  @return  Fresh value identified by `i`.
    */
-  protected final def Value(i: Int): Value = Value(i, nextNameOrNull)
+  // The implementation is hardwired to `scala.tools.reflect.EnumerationImpl.enumerationValue`
+  // using the mechanism implemented in `scala.tools.reflect.FastTrack`
+  protected final def Value(i: Int): Value = macro ???
+
+  // shim until reSTARR
+  protected[scala] final def _Value(i: Int): Value = Value(i, nextNameOrNull)
 
   /** Creates a fresh value, part of this enumeration, called `name`.
    *

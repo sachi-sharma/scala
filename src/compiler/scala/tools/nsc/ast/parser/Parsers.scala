@@ -855,7 +855,7 @@ self =>
 
     /** Modes for infix types. */
     object InfixMode extends Enumeration {
-      val FirstOp, LeftOp, RightOp = Value
+      val FirstOp, LeftOp, RightOp = _Value
     }
 
     var opstack: List[OpInfo] = Nil

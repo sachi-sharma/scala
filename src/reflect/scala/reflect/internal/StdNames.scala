@@ -643,6 +643,7 @@ trait StdNames {
     val TypeRef: NameType              = "TypeRef"
     val TypeTree: NameType             = "TypeTree"
     val UNIT : NameType                = "UNIT"
+    val Value : NameType               = "Value"
     val accessor: NameType             = "accessor"
     val add_ : NameType                = "add"
     val annotation: NameType           = "annotation"

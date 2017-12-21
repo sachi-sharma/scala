@@ -1,6 +1,6 @@
 package scala.tools.nsc.doc.html
 
-import org.junit.Test
+import org.junit.{Ignore, Test}
 import org.junit.Assert._
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
@@ -10,6 +10,7 @@ import scala.tools.testing.AssertUtil._
 @RunWith(classOf[JUnit4])
 class HtmlDocletTest {
   @Test
+  @Ignore // unignore after Enumeration change reSTARR
   def testSyntaxHighlightingUnicode() {
     val in = "unicode: …"
 

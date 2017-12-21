@@ -443,7 +443,7 @@ class ILoop(config: ShellConfig, inOverride: BufferedReader = null,
   // after process line, OK continue, ERR break, or EOF all done
   object LineResults extends Enumeration {
     type LineResult = Value
-    val EOF, ERR, OK = Value
+    val EOF, ERR, OK = _Value
   }
   import LineResults.LineResult
 

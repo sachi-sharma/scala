@@ -921,7 +921,7 @@ trait ContextErrors {
 
       object PolyAlternativeErrorKind extends Enumeration {
         type ErrorType = Value
-        val WrongNumber, NoParams, ArgsDoNotConform = Value
+        val WrongNumber, NoParams, ArgsDoNotConform = _Value
       }
 
       private def issueAmbiguousTypeErrorUnlessErroneous(pos: Position, pre: Type, sym1: Symbol, sym2: Symbol, rest: String): Unit = {
@@ -1100,11 +1100,11 @@ trait ContextErrors {
         val ImplicitConstr, ImplicitNotTermOrClass, ImplicitAtToplevel,
           OverrideClass, SealedNonClass, AbstractNonClass,
           OverrideConstr, AbstractOverride, AbstractOverrideOnTypeMember, LazyAndEarlyInit,
-          ByNameParameter, AbstractVar = Value
+          ByNameParameter, AbstractVar = _Value
       }
 
       object DuplicatesErrorKinds extends Enumeration {
-        val RenamedTwice, AppearsTwice = Value
+        val RenamedTwice, AppearsTwice = _Value
       }
 
       import SymValidateErrors._

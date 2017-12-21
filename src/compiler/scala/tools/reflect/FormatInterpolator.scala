@@ -206,7 +206,7 @@ abstract class FormatInterpolator {
   }
 
   val fpat = """%(?:(\d+)\$)?([-#+ 0,(\<]+)?(\d+)?(\.\d+)?([tT]?[%a-zA-Z])?""".r
-  object SpecifierGroups extends Enumeration { val Spec, Index, Flags, Width, Precision, CC = Value }
+  object SpecifierGroups extends Enumeration { val Spec, Index, Flags, Width, Precision, CC = _Value }
 
   val stdContextTags = new { val tc: c.type = c } with StdContextTags
   import stdContextTags._

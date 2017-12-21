@@ -221,7 +221,7 @@ abstract class HtmlPage extends Page { thisPage =>
   }
 
   object Image extends Enumeration {
-    val Trait, Class, Type, Object, Package = Value
+    val Trait, Class, Type, Object, Package = _Value
   }
 
   def permalink(template: Entity, isSelf: Boolean = true): Elem =
